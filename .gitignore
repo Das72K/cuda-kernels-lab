@@ -1,0 +1,31 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.so
+*.exe
+*.ptx
+*.cubin
+*.fatbin
+
+# Profiler reports
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# Editors / OS
+.vscode/
+.idea/
+.cache/
+*.swp
+.DS_Store
+Thumbs.db
