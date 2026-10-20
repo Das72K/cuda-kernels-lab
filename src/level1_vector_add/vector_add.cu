@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <vector>
 #include <chrono>
+#include <cstring>
 
 #include "cuda_utils.h"
 
@@ -27,6 +28,7 @@ struct Result {
     double cpu_ms;
     float  kernel_ms;
     float  total_ms;
+    float  total_pinned_ms;
     double gbps;        // kernel bandwidth
     int    errors;
 };
@@ -92,6 +94,35 @@ Result runBenchmark(int n, int reps)
     CUDA_CHECK(cudaGetLastError());
     r.total_ms = timer.elapsed_ms() / reps;
 
+    // ---------- GPU: total trip, pinned host memory ----------
+    float *p_a = nullptr, *p_b = nullptr, *p_c = nullptr;
+    CUDA_CHECK(cudaMallocHost(&p_a, bytes));
+    CUDA_CHECK(cudaMallocHost(&p_b, bytes));
+    CUDA_CHECK(cudaMallocHost(&p_c, bytes));
+    std::memcpy(p_a, h_a.data(), bytes);
+    std::memcpy(p_b, h_b.data(), bytes);
+
+    timer.start();
+    for (int k = 0; k < reps; k++) {
+        CUDA_CHECK(cudaMemcpy(d_a, p_a, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_b, p_b, bytes, cudaMemcpyHostToDevice));
+        vectorAdd<<<blocks, threadsPerBlock>>>(d_a, d_b, d_c, n);
+        CUDA_CHECK(cudaMemcpy(p_c, d_c, bytes, cudaMemcpyDeviceToHost));
+    }
+    timer.stop();
+    CUDA_CHECK(cudaGetLastError());
+    r.total_pinned_ms = timer.elapsed_ms() / reps;
+
+    for (int i = 0; i < n; i++) {
+        if (p_c[i] != h_c_cpu[i]) {
+            r.errors++;
+        }
+    }
+
+    CUDA_CHECK(cudaFreeHost(p_a));
+    CUDA_CHECK(cudaFreeHost(p_b));
+    CUDA_CHECK(cudaFreeHost(p_c));
+
     CUDA_CHECK(cudaFree(d_a));
     CUDA_CHECK(cudaFree(d_b));
     CUDA_CHECK(cudaFree(d_c));
@@ -112,18 +143,19 @@ int main()
     const int sizes[] = { 1'000, 10'000, 100'000, 1'000'000,
                           10'000'000, 50'000'000, 100'000'000 };
 
-    std::printf("%12s %9s %10s %10s %9s %9s %10s %9s %6s\n",
+    std::printf("%12s %9s %10s %10s %9s %9s %10s %9s %10s %9s %6s\n",
                 "n", "MB/array", "CPU ms", "kern ms", "kern GB/s",
-                "kern x", "total ms", "total x", "check");
+                "kern x", "total ms", "total x", "pinned ms", "pinned x", "check");
 
     for (int n : sizes) {
         int reps = (n <= 1'000'000) ? 100 : 10;   // more repeats for tiny, noisy sizes
         Result r = runBenchmark(n, reps);
 
-        std::printf("%12d %9.1f %10.4f %10.4f %9.1f %9.1f %10.4f %9.2f %6s\n",
+        std::printf("%12d %9.1f %10.4f %10.4f %9.1f %9.1f %10.4f %9.2f %10.4f %9.2f %6s\n",
                     n, n * sizeof(float) / 1e6,
                     r.cpu_ms, r.kernel_ms, r.gbps, r.cpu_ms / r.kernel_ms,
                     r.total_ms, r.cpu_ms / r.total_ms,
+                    r.total_pinned_ms, r.cpu_ms / r.total_pinned_ms,
                     r.errors == 0 ? "PASS" : "FAIL");
     }
     return 0;
