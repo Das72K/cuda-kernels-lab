@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <random>
 #include <vector>
+
+#include <cub/cub.cuh>
 
 #include "cuda_utils.h"
 
@@ -208,22 +211,28 @@ const int* reduceMultiPass(ReduceKernel kernel, int elemsPerBlock,
     return src;
 }
 
-// Warm-up once, then average `reps` timed runs of `launch` with CUDA events
+// Warm-up once, then run `trials` timed batches of `reps` launches and return the
+// MEDIAN per-launch time (robust against laptop clock changes between runs)
 template <typename F>
-float timeGpu(F launch, int reps)
+float timeGpu(F launch, int reps, int trials = 7)
 {
     launch();
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
+    std::vector<float> times;
     GpuTimer timer;
-    timer.start();
-    for (int k = 0; k < reps; k++) {
-        launch();
+    for (int t = 0; t < trials; t++) {
+        timer.start();
+        for (int k = 0; k < reps; k++) {
+            launch();
+        }
+        timer.stop();
+        CUDA_CHECK(cudaGetLastError());
+        times.push_back(timer.elapsed_ms() / reps);
     }
-    timer.stop();
-    CUDA_CHECK(cudaGetLastError());
-    return timer.elapsed_ms() / reps;
+    std::sort(times.begin(), times.end());
+    return times[trials / 2];
 }
 
 int main()
@@ -242,13 +251,18 @@ int main()
 
     // ---------- CPU baseline (also the reference result) ----------
     const long long cpu_sum = sumCPU(h_in.data(), n);   // warm-up + reference
-    auto t0 = std::chrono::high_resolution_clock::now();
-    for (int k = 0; k < reps; k++) {
-        long long s = sumCPU(h_in.data(), n);
-        doNotOptimize(s);
+    std::vector<double> cpu_times;
+    for (int t = 0; t < 7; t++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int k = 0; k < reps; k++) {
+            long long s = sumCPU(h_in.data(), n);
+            doNotOptimize(s);
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        cpu_times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count() / reps);
     }
-    auto t1 = std::chrono::high_resolution_clock::now();
-    const double cpu_ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+    std::sort(cpu_times.begin(), cpu_times.end());
+    const double cpu_ms = cpu_times[cpu_times.size() / 2];
 
     // ---------- GPU buffers ----------
     const int maxBlocks = (n + BLOCK - 1) / BLOCK;
@@ -317,6 +331,20 @@ int main()
     }, reps);
     CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
     printRow("v5 warp shuffle", ms, result);
+
+    // ---------- reference: NVIDIA CUB library ----------
+    void*  d_temp     = nullptr;
+    size_t temp_bytes = 0;
+    CUDA_CHECK(cub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n));   // query scratch size
+    CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
+    ms = timeGpu([&] {
+        CUDA_CHECK(cub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n));
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("CUB DeviceReduce::Sum", ms, result);
+    CUDA_CHECK(cudaFree(d_temp));
+
+    std::printf("\nTimes are the median of 7 trials. Peak DRAM bandwidth (spec): 192 GB/s\n");
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_bufA));

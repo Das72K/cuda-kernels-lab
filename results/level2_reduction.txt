@@ -1,10 +1,13 @@
 n = 33554432 (134.2 MB), block = 256 threads, CPU sum = 151006621
 
 version                        ms       GB/s    vs CPU          sum  check
-CPU (1 core)              11.2483       11.9       1.0    151006621    ref
-v0 atomicAdd               0.7181      186.9      15.7    151006621   PASS
-v1 tree interleaved        2.3263       57.7       4.8    151006621   PASS
-v2 tree strided            1.6309       82.3       6.9    151006621   PASS
-v3 tree sequential         1.4455       92.9       7.8    151006621   PASS
-v4 first add on load       0.7264      184.8      15.5    151006621   PASS
-v5 warp shuffle            0.7279      184.4      15.5    151006621   PASS
+CPU (1 core)              10.3878       12.9       1.0    151006621    ref
+v0 atomicAdd               0.7198      186.5      14.4    151006621   PASS
+v1 tree interleaved        2.1376       62.8       4.9    151006621   PASS
+v2 tree strided            1.2471      107.6       8.3    151006621   PASS
+v3 tree sequential         1.2031      111.6       8.6    151006621   PASS
+v4 first add on load       0.7302      183.8      14.2    151006621   PASS
+v5 warp shuffle            0.7270      184.6      14.3    151006621   PASS
+CUB DeviceReduce::Sum      0.7201      186.4      14.4    151006621   PASS
+
+Times are the median of 7 trials. Peak DRAM bandwidth (spec): 192 GB/s
