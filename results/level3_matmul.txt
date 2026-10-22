@@ -1,10 +1,11 @@
 n = 2048 (16.8 MB per matrix), 17.18 GFLOP per multiply, block = 16x16
 
 version                            ms     GFLOPS   % cuBLAS    max err  check
-CPU (1 core, ikj)              2489.6        6.9      0.11%   3.81e-05   PASS
-cuBLAS sgemm (reference)        2.707     6345.6     100.0%   0.00e+00   PASS
-v0 naive (uncoalesced)         84.703      202.8       3.2%   0.00e+00   PASS
-v1 naive (coalesced)           20.084      855.4      13.5%   0.00e+00   PASS
-v2 tiled (shared mem)          15.427     1113.6      17.5%   0.00e+00   PASS
+CPU (1 core, ikj)              2445.0        7.0      0.11%   3.81e-05   PASS
+cuBLAS sgemm (reference)        2.703     6355.8     100.0%   0.00e+00   PASS
+v0 naive (uncoalesced)         84.693      202.8       3.2%   0.00e+00   PASS
+v1 naive (coalesced)           20.079      855.6      13.5%   0.00e+00   PASS
+v2 tiled (shared mem)          15.442     1112.5      17.5%   0.00e+00   PASS
+v3 register tiling 4x4          3.089     5562.1      87.5%   0.00e+00   PASS
 
 GPU times are the median of 7 trials; CPU is a single run.

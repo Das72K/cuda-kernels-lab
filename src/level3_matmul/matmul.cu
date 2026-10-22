@@ -94,6 +94,72 @@ __global__ void matmulV2(const float* A, const float* B, float* C, int n)
 }
 
 // ============================================================
+// v3: 2D register tiling
+//     block computes a BM x BN tile of C with (BM/TM) x (BN/TN) = 16 x 16 threads,
+//     each thread computes TM x TN = 4 x 4 outputs held in registers.
+//     Per k step: TM + TN = 8 shared loads for TM * TN = 16 FMAs (v2: 2 loads per FMA)
+//     Requires n % BM == 0 and n % BN == 0 and n % BK == 0.
+// ============================================================
+constexpr int BM = 64, BN = 64, BK = 8;   // block tile sizes
+constexpr int TM = 4,  TN = 4;            // per-thread tile sizes
+constexpr int V3_THREADS = (BM / TM) * (BN / TN);   // 256
+
+__global__ void matmulV3(const float* A, const float* B, float* C, int n)
+{
+    __shared__ float As[BM][BK];   // 64 x 8 tile of A
+    __shared__ float Bs[BK][BN];   // 8 x 64 tile of B
+
+    const int tx  = threadIdx.x;              // 0..15 -> which group of TN columns
+    const int ty  = threadIdx.y;              // 0..15 -> which group of TM rows
+    const int tid = ty * blockDim.x + tx;     // 0..255, linear id for loading
+
+    const int rowBase = blockIdx.y * BM;      // top-left corner of this block's C tile
+    const int colBase = blockIdx.x * BN;
+
+    float acc[TM][TN] = {};                   // 16 running sums, all in registers
+
+    for (int t = 0; t < n; t += BK) {
+        // 1. cooperative load: 512 floats of A and 512 of B, 2 of each per thread
+        #pragma unroll
+        for (int l = 0; l < (BM * BK) / V3_THREADS; l++) {
+            const int idx = tid + l * V3_THREADS;
+            const int r = idx / BK, c = idx % BK;
+            As[r][c] = A[(rowBase + r) * n + (t + c)];
+        }
+        #pragma unroll
+        for (int l = 0; l < (BK * BN) / V3_THREADS; l++) {
+            const int idx = tid + l * V3_THREADS;
+            const int r = idx / BN, c = idx % BN;
+            Bs[r][c] = B[(t + r) * n + (colBase + c)];
+        }
+        __syncthreads();
+
+        // 2. for each k: 4 values of A and 4 of B into registers, then 16 FMAs
+        #pragma unroll
+        for (int k = 0; k < BK; k++) {
+            float a[TM], b[TN];
+            #pragma unroll
+            for (int i = 0; i < TM; i++) a[i] = As[ty * TM + i][k];
+            #pragma unroll
+            for (int j = 0; j < TN; j++) b[j] = Bs[k][tx * TN + j];
+            #pragma unroll
+            for (int i = 0; i < TM; i++)
+                #pragma unroll
+                for (int j = 0; j < TN; j++)
+                    acc[i][j] += a[i] * b[j];
+        }
+        __syncthreads();
+    }
+
+    // 3. write the 4 x 4 results
+    #pragma unroll
+    for (int i = 0; i < TM; i++)
+        #pragma unroll
+        for (int j = 0; j < TN; j++)
+            C[(rowBase + ty * TM + i) * n + (colBase + tx * TN + j)] = acc[i][j];
+}
+
+// ============================================================
 // CPU baseline: i-k-j loop order (walks rows of B and C, which is cache-friendly)
 // ============================================================
 void matmulCPU(const float* A, const float* B, float* C, int n)
@@ -199,6 +265,16 @@ int main()
     CUDA_CHECK(cudaMemset(d_C, 0, bytes));
     ms = timeGpu([&] { matmulV2<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
     printRow("v2 tiled (shared mem)", ms);
+
+    // ---------- v3: 2D register tiling (64x64 block tile, 4x4 per thread) ----------
+    if (n % BM == 0 && n % BN == 0 && n % BK == 0) {
+        const dim3 grid3(n / BN, n / BM);
+        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+        ms = timeGpu([&] { matmulV3<<<grid3, block>>>(d_A, d_B, d_C, n); }, reps);
+        printRow("v3 register tiling 4x4", ms);
+    } else {
+        std::printf("v3 skipped: n must be a multiple of %d\n", BM);
+    }
 
     std::printf("\nGPU times are the median of 7 trials; CPU is a single run.\n");
 
