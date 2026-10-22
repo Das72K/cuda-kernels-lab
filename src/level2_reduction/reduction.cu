@@ -75,6 +75,32 @@ __global__ void reduceV2(const int* in, int* out, int n)
 }
 
 // ============================================================
+// v3: tree reduction, sequential addressing ("fold in half")
+//     -> contiguous active threads AND no shared memory bank conflicts
+// ============================================================
+__global__ void reduceV3(const int* in, int* out, int n)
+{
+    __shared__ int sdata[BLOCK];
+
+    unsigned int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    sdata[tid] = (i < n) ? in[i] : 0;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {   // s = 128, 64, 32, ..., 1
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out[blockIdx.x] = sdata[0];
+    }
+}
+
+// ============================================================
 // Host helpers
 // ============================================================
 long long sumCPU(const int* in, int n)
@@ -200,6 +226,13 @@ int main()
     }, reps);
     CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
     printRow("v2 tree strided", ms, result);
+
+    // ---------- v3: shared-memory tree, sequential addressing ----------
+    ms = timeGpu([&] {
+        d_res = reduceMultiPass(reduceV3, BLOCK, d_in, d_bufA, d_bufB, n);
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("v3 tree sequential", ms, result);
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_bufA));
