@@ -160,6 +160,69 @@ __global__ void matmulV3(const float* A, const float* B, float* C, int n)
 }
 
 // ============================================================
+// v4: v3 + vectorized float4 shared-memory reads
+//     - A tile stored TRANSPOSED (AsT[k][row]) so a thread's 4 A values are contiguous
+//     - +4 padding per row removes the bank conflicts of the transposed stores
+//     - per k step: 2 float4 loads instead of 8 scalar loads; float4 stores of C
+// ============================================================
+constexpr int PAD = 4;
+static_assert(TM == 4 && TN == 4, "v4 uses float4, so TM and TN must be 4");
+
+__global__ void matmulV4(const float* A, const float* B, float* C, int n)
+{
+    __shared__ __align__(16) float AsT[BK][BM + PAD];   // transposed + padded A tile
+    __shared__ __align__(16) float Bs[BK][BN];
+
+    const int tx  = threadIdx.x;
+    const int ty  = threadIdx.y;
+    const int tid = ty * blockDim.x + tx;
+
+    const int rowBase = blockIdx.y * BM;
+    const int colBase = blockIdx.x * BN;
+
+    float acc[TM][TN] = {};
+
+    for (int t = 0; t < n; t += BK) {
+        // 1. load A tile (stored transposed) and B tile, 2 elements of each per thread
+        #pragma unroll
+        for (int l = 0; l < (BM * BK) / V3_THREADS; l++) {
+            const int idx = tid + l * V3_THREADS;
+            const int r = idx / BK, c = idx % BK;
+            AsT[c][r] = A[(rowBase + r) * n + (t + c)];
+        }
+        #pragma unroll
+        for (int l = 0; l < (BK * BN) / V3_THREADS; l++) {
+            const int idx = tid + l * V3_THREADS;
+            const int r = idx / BN, c = idx % BN;
+            Bs[r][c] = B[(t + r) * n + (colBase + c)];
+        }
+        __syncthreads();
+
+        // 2. one float4 load for A's 4 values, one for B's 4 values, then 16 FMAs
+        #pragma unroll
+        for (int k = 0; k < BK; k++) {
+            const float4 a4 = *reinterpret_cast<const float4*>(&AsT[k][ty * TM]);
+            const float4 b4 = *reinterpret_cast<const float4*>(&Bs[k][tx * TN]);
+            const float a[TM] = {a4.x, a4.y, a4.z, a4.w};
+            const float b[TN] = {b4.x, b4.y, b4.z, b4.w};
+            #pragma unroll
+            for (int i = 0; i < TM; i++)
+                #pragma unroll
+                for (int j = 0; j < TN; j++)
+                    acc[i][j] += a[i] * b[j];
+        }
+        __syncthreads();
+    }
+
+    // 3. write each row of the 4 x 4 result with one float4 store
+    #pragma unroll
+    for (int i = 0; i < TM; i++) {
+        *reinterpret_cast<float4*>(&C[(rowBase + ty * TM + i) * n + (colBase + tx * TN)]) =
+            make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+    }
+}
+
+// ============================================================
 // CPU baseline: i-k-j loop order (walks rows of B and C, which is cache-friendly)
 // ============================================================
 void matmulCPU(const float* A, const float* B, float* C, int n)
@@ -274,6 +337,16 @@ int main()
         printRow("v3 register tiling 4x4", ms);
     } else {
         std::printf("v3 skipped: n must be a multiple of %d\n", BM);
+    }
+
+    // ---------- v4: v3 + float4 shared-memory reads, transposed + padded A tile ----------
+    if (n % BM == 0 && n % BN == 0 && n % BK == 0) {
+        const dim3 grid4(n / BN, n / BM);
+        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+        ms = timeGpu([&] { matmulV4<<<grid4, block>>>(d_A, d_B, d_C, n); }, reps);
+        printRow("v4 float4 + transposed A", ms);
+    } else {
+        std::printf("v4 skipped: n must be a multiple of %d\n", BM);
     }
 
     std::printf("\nGPU times are the median of 7 trials; CPU is a single run.\n");
