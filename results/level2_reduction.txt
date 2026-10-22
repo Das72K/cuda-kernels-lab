@@ -1,9 +1,10 @@
 n = 33554432 (134.2 MB), block = 256 threads, CPU sum = 151006621
 
 version                        ms       GB/s    vs CPU          sum  check
-CPU (1 core)               9.9744       13.5       1.0    151006621    ref
-v0 atomicAdd               0.7182      186.9      13.9    151006621   PASS
-v1 tree interleaved        2.3252       57.7       4.3    151006621   PASS
-v2 tree strided            1.6306       82.3       6.1    151006621   PASS
-v3 tree sequential         1.5783       85.0       6.3    151006621   PASS
-v4 first add on load       0.8224      163.2      12.1    151006621   PASS
+CPU (1 core)              11.2483       11.9       1.0    151006621    ref
+v0 atomicAdd               0.7181      186.9      15.7    151006621   PASS
+v1 tree interleaved        2.3263       57.7       4.8    151006621   PASS
+v2 tree strided            1.6309       82.3       6.9    151006621   PASS
+v3 tree sequential         1.4455       92.9       7.8    151006621   PASS
+v4 first add on load       0.7264      184.8      15.5    151006621   PASS
+v5 warp shuffle            0.7279      184.4      15.5    151006621   PASS

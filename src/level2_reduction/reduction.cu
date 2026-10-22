@@ -132,6 +132,45 @@ __global__ void reduceV4(const int* in, int* out, int n)
 }
 
 // ============================================================
+// v5: like v4, but the last 32 values are reduced with warp shuffles
+//     (no shared memory and no __syncthreads for the final rounds)
+//     requires BLOCK >= 64
+// ============================================================
+__global__ void reduceV5(const int* in, int* out, int n)
+{
+    __shared__ int sdata[BLOCK];
+
+    unsigned int tid = threadIdx.x;
+    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+    int sum = (i < n) ? in[i] : 0;
+    if (i + blockDim.x < n) {
+        sum += in[i + blockDim.x];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+
+    // tree in shared memory only while more than one warp is needed
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // last 64 values: warp 0 finishes in registers
+    if (tid < 32) {
+        int v = sdata[tid] + sdata[tid + 32];
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            v += __shfl_down_sync(0xffffffff, v, offset);
+        }
+        if (tid == 0) {
+            out[blockIdx.x] = v;
+        }
+    }
+}
+
+// ============================================================
 // Host helpers
 // ============================================================
 long long sumCPU(const int* in, int n)
@@ -271,6 +310,13 @@ int main()
     }, reps);
     CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
     printRow("v4 first add on load", ms, result);
+
+    // ---------- v5: v4 + warp shuffle for the last warp ----------
+    ms = timeGpu([&] {
+        d_res = reduceMultiPass(reduceV5, 2 * BLOCK, d_in, d_bufA, d_bufB, n);
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("v5 warp shuffle", ms, result);
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_bufA));
