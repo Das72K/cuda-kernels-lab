@@ -101,6 +101,37 @@ __global__ void reduceV3(const int* in, int* out, int n)
 }
 
 // ============================================================
+// v4: first add during load -> each block reduces 2 * BLOCK elements
+//     (no idle threads in the first round, half as many blocks)
+// ============================================================
+__global__ void reduceV4(const int* in, int* out, int n)
+{
+    __shared__ int sdata[BLOCK];
+
+    unsigned int tid = threadIdx.x;
+    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+    // each thread loads two elements, blockDim.x apart (both loads stay coalesced), and adds them
+    int sum = (i < n) ? in[i] : 0;
+    if (i + blockDim.x < n) {
+        sum += in[i + blockDim.x];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out[blockIdx.x] = sdata[0];
+    }
+}
+
+// ============================================================
 // Host helpers
 // ============================================================
 long long sumCPU(const int* in, int n)
@@ -233,6 +264,13 @@ int main()
     }, reps);
     CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
     printRow("v3 tree sequential", ms, result);
+
+    // ---------- v4: first add during load (2 * BLOCK elements per block) ----------
+    ms = timeGpu([&] {
+        d_res = reduceMultiPass(reduceV4, 2 * BLOCK, d_in, d_bufA, d_bufB, n);
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("v4 first add on load", ms, result);
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_bufA));
