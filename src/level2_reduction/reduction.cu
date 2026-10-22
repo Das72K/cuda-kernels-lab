@@ -48,6 +48,33 @@ __global__ void reduceV1(const int* in, int* out, int n)
 }
 
 // ============================================================
+// v2: tree reduction, strided index -> active threads are contiguous (no divergence)
+//     (new problem: shared memory bank conflicts)
+// ============================================================
+__global__ void reduceV2(const int* in, int* out, int n)
+{
+    __shared__ int sdata[BLOCK];
+
+    unsigned int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    sdata[tid] = (i < n) ? in[i] : 0;
+    __syncthreads();
+
+    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+        unsigned int index = 2 * s * tid;      // thread tid works on slot 2*s*tid
+        if (index < blockDim.x) {
+            sdata[index] += sdata[index + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out[blockIdx.x] = sdata[0];
+    }
+}
+
+// ============================================================
 // Host helpers
 // ============================================================
 long long sumCPU(const int* in, int n)
@@ -166,6 +193,13 @@ int main()
     }, reps);
     CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
     printRow("v1 tree interleaved", ms, result);
+
+    // ---------- v2: shared-memory tree, strided index ----------
+    ms = timeGpu([&] {
+        d_res = reduceMultiPass(reduceV2, BLOCK, d_in, d_bufA, d_bufB, n);
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("v2 tree strided", ms, result);
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_bufA));
