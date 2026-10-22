@@ -6,6 +6,7 @@
 
 #include <cub/cub.cuh>
 
+#include "bench_utils.h"
 #include "cuda_utils.h"
 
 constexpr int BLOCK = 256;  // threads per block (power of 2, needed by the tree)
@@ -185,13 +186,6 @@ long long sumCPU(const int* in, int n)
     return s;
 }
 
-// Stops the compiler from deleting "unused" benchmark work (same idea as Level 1's barrier)
-template <typename T>
-inline void doNotOptimize(const T& value)
-{
-    asm volatile("" : : "r,m"(value) : "memory");
-}
-
 using ReduceKernel = void (*)(const int*, int*, int);
 
 // Launches `kernel` repeatedly: n values -> one partial sum per block -> ... -> 1 value.
@@ -209,30 +203,6 @@ const int* reduceMultiPass(ReduceKernel kernel, int elemsPerBlock,
         dst = (dst == d_bufA) ? d_bufB : d_bufA;
     }
     return src;
-}
-
-// Warm-up once, then run `trials` timed batches of `reps` launches and return the
-// MEDIAN per-launch time (robust against laptop clock changes between runs)
-template <typename F>
-float timeGpu(F launch, int reps, int trials = 7)
-{
-    launch();
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    std::vector<float> times;
-    GpuTimer timer;
-    for (int t = 0; t < trials; t++) {
-        timer.start();
-        for (int k = 0; k < reps; k++) {
-            launch();
-        }
-        timer.stop();
-        CUDA_CHECK(cudaGetLastError());
-        times.push_back(timer.elapsed_ms() / reps);
-    }
-    std::sort(times.begin(), times.end());
-    return times[trials / 2];
 }
 
 int main()

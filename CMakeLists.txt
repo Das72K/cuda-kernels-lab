@@ -35,3 +35,4 @@ endfunction()
 
 add_subdirectory(src/level1_vector_add)
 add_subdirectory(src/level2_reduction)
+add_subdirectory(src/level3_matmul)
