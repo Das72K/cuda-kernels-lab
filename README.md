@@ -77,3 +77,49 @@ laptop plugged in. CPU baseline = single-threaded loop.
 ```bash
 cmake -S . -B build && cmake --build build && ./build/bin/level1_vector_add
 ```
+
+## Level 2: Reduction (sum of 33.5M ints)
+
+The kernels sum n = 2^25 random ints (0–9, fixed seed, 134 MB, larger than L2) on the GPU; ints keep
+the result exact, so GPU and CPU must match bit-for-bit.
+
+**Test setup:** same hardware as Level 1; times are the median of 7 trials; peak DRAM bandwidth
+(spec) 192 GB/s.
+
+| version               |      ms |  GB/s | vs CPU |       sum | check |
+|-----------------------|--------:|------:|-------:|----------:|:-----:|
+| CPU (1 core)          | 10.3878 |  12.9 |    1.0 | 151006621 |  ref  |
+| v0 atomicAdd          |  0.7198 | 186.5 |   14.4 | 151006621 | PASS  |
+| v1 tree interleaved   |  2.1376 |  62.8 |    4.9 | 151006621 | PASS  |
+| v2 tree strided       |  1.2471 | 107.6 |    8.3 | 151006621 | PASS  |
+| v3 tree sequential    |  1.2031 | 111.6 |    8.6 | 151006621 | PASS  |
+| v4 first add on load  |  0.7302 | 183.8 |   14.2 | 151006621 | PASS  |
+| v5 warp shuffle       |  0.7270 | 184.6 |   14.3 | 151006621 | PASS  |
+| CUB DeviceReduce::Sum |  0.7201 | 186.4 |   14.4 | 151006621 | PASS  |
+
+### Findings
+
+- **Atomics are not automatically slow:** v0 (`atomicAdd` on one counter) runs at 186.5 GB/s.
+  The SASS shows why: the compiler warp-aggregates the atomics (`REDUX.SUM` + one `RED.E.ADD`
+  per warp), so ~1M atomics reach the L2 instead of 33.5M.
+- **Warp divergence (v1 → v2, 1.71×):** v1 picks working threads with `tid % (2*s) == 0`,
+  leaving half of every warp idle; v2 packs the work onto contiguous threads so whole warps
+  are either busy or skipped, and drops the slow modulo.
+- **Bank conflicts (v2 → v3, 1.04×):** v2's strided shared-memory access causes 2-way and
+  higher bank conflicts; v3's "fold in half" addressing removes them. On this GPU the gain is
+  small, because the worst conflicts occur in late rounds when few threads are active.
+- **More work per thread (v3 → v4, 1.65×):** loading and adding two elements per thread
+  removes the idle first round and halves the number of blocks; v4 reaches 183.8 GB/s.
+- **The memory roofline:** v0, v4, v5 and NVIDIA's CUB all land at 184–187 GB/s, about 97%
+  of the 192 GB/s spec. Reduction is memory-bound, so once a version hits this ceiling,
+  compute optimizations stop showing up: the warp-shuffle v5 is no faster than v4, and a
+  further grid-stride version was not added because there is nothing left to gain here.
+- **Measuring honestly:** with a single timed batch, v1–v3 varied by up to ~30% between runs,
+  while the memory-bound versions did not. These kernels depend on the boosting SM clock;
+  reporting the median of 7 trials made the results stable.
+
+### How to run
+
+```bash
+./build/bin/level2_reduction
+```
