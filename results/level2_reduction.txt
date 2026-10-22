@@ -1,0 +1,6 @@
+n = 33554432 (134.2 MB), block = 256 threads, CPU sum = 151006621
+
+version                        ms       GB/s    vs CPU          sum  check
+CPU (1 core)              14.3606        9.3       1.0    151006621    ref
+v0 atomicAdd               0.7209      186.2      19.9    151006621   PASS
+v1 tree interleaved        2.3268       57.7       6.2    151006621   PASS

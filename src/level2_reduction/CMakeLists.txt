@@ -1,0 +1,1 @@
+add_lab_executable(level2_reduction reduction.cu)

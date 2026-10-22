@@ -34,3 +34,4 @@ function(add_lab_executable name)
 endfunction()
 
 add_subdirectory(src/level1_vector_add)
+add_subdirectory(src/level2_reduction)

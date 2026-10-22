@@ -1,0 +1,175 @@
+#include <chrono>
+#include <cstdio>
+#include <random>
+#include <vector>
+
+#include "cuda_utils.h"
+
+constexpr int BLOCK = 256;  // threads per block (power of 2, needed by the tree)
+
+// ============================================================
+// v0: every thread atomically adds its element to ONE global counter
+// ============================================================
+__global__ void reduceV0Atomic(const int* in, int* out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        atomicAdd(out, in[i]);
+    }
+}
+
+// ============================================================
+// v1: tree reduction in shared memory, interleaved addressing
+//     (simple but slow: divergent branches + slow modulo)
+// ============================================================
+__global__ void reduceV1(const int* in, int* out, int n)
+{
+    __shared__ int sdata[BLOCK];
+
+    unsigned int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // 1. each thread copies one element from global memory to shared memory
+    sdata[tid] = (i < n) ? in[i] : 0;
+    __syncthreads();
+
+    // 2. tournament: in round s, thread tid adds the value of its partner tid + s
+    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+        if (tid % (2 * s) == 0) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // 3. thread 0 writes this block's partial sum
+    if (tid == 0) {
+        out[blockIdx.x] = sdata[0];
+    }
+}
+
+// ============================================================
+// Host helpers
+// ============================================================
+long long sumCPU(const int* in, int n)
+{
+    long long s = 0;
+    for (int i = 0; i < n; i++) {
+        s += in[i];
+    }
+    return s;
+}
+
+// Stops the compiler from deleting "unused" benchmark work (same idea as Level 1's barrier)
+template <typename T>
+inline void doNotOptimize(const T& value)
+{
+    asm volatile("" : : "r,m"(value) : "memory");
+}
+
+using ReduceKernel = void (*)(const int*, int*, int);
+
+// Launches `kernel` repeatedly: n values -> one partial sum per block -> ... -> 1 value.
+// Returns a device pointer to the final result.
+const int* reduceMultiPass(ReduceKernel kernel, int elemsPerBlock,
+                           const int* d_in, int* d_bufA, int* d_bufB, int n)
+{
+    const int* src = d_in;
+    int*       dst = d_bufA;
+    while (n > 1) {
+        int blocks = (n + elemsPerBlock - 1) / elemsPerBlock;
+        kernel<<<blocks, BLOCK>>>(src, dst, n);
+        n   = blocks;
+        src = dst;
+        dst = (dst == d_bufA) ? d_bufB : d_bufA;
+    }
+    return src;
+}
+
+// Warm-up once, then average `reps` timed runs of `launch` with CUDA events
+template <typename F>
+float timeGpu(F launch, int reps)
+{
+    launch();
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    GpuTimer timer;
+    timer.start();
+    for (int k = 0; k < reps; k++) {
+        launch();
+    }
+    timer.stop();
+    CUDA_CHECK(cudaGetLastError());
+    return timer.elapsed_ms() / reps;
+}
+
+int main()
+{
+    const int    n     = 1 << 25;                    // 33.5M ints = 128 MB (much bigger than L2)
+    const size_t bytes = size_t(n) * sizeof(int);
+    const int    reps  = 20;
+
+    // ---------- input: random digits 0..9, fixed seed so every run is identical ----------
+    std::vector<int> h_in(n);
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> dist(0, 9);
+    for (int& x : h_in) {
+        x = dist(rng);
+    }
+
+    // ---------- CPU baseline (also the reference result) ----------
+    const long long cpu_sum = sumCPU(h_in.data(), n);   // warm-up + reference
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (int k = 0; k < reps; k++) {
+        long long s = sumCPU(h_in.data(), n);
+        doNotOptimize(s);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const double cpu_ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+
+    // ---------- GPU buffers ----------
+    const int maxBlocks = (n + BLOCK - 1) / BLOCK;
+    int *d_in = nullptr, *d_bufA = nullptr, *d_bufB = nullptr, *d_out = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_in, bytes));
+    CUDA_CHECK(cudaMalloc(&d_bufA, maxBlocks * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_bufB, maxBlocks * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_out, sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), bytes, cudaMemcpyHostToDevice));
+
+    // ---------- results table ----------
+    std::printf("n = %d (%.1f MB), block = %d threads, CPU sum = %lld\n\n",
+                n, bytes / 1e6, BLOCK, cpu_sum);
+    std::printf("%-22s %10s %10s %9s %12s %6s\n", "version", "ms", "GB/s", "vs CPU", "sum", "check");
+    std::printf("%-22s %10.4f %10.1f %9s %12lld %6s\n", "CPU (1 core)", cpu_ms,
+                bytes / (cpu_ms / 1000.0) / 1e9, "1.0", cpu_sum, "ref");
+
+    auto printRow = [&](const char* name, float ms, long long result) {
+        double gbps = bytes / (ms / 1000.0) / 1e9;
+        std::printf("%-22s %10.4f %10.1f %9.1f %12lld %6s\n", name, ms, gbps, cpu_ms / ms,
+                    result, result == cpu_sum ? "PASS" : "FAIL");
+    };
+
+    int result = 0;
+
+    // ---------- v0: atomics ----------
+    float ms = timeGpu([&] {
+        CUDA_CHECK(cudaMemsetAsync(d_out, 0, sizeof(int)));   // reset the counter each run
+        reduceV0Atomic<<<maxBlocks, BLOCK>>>(d_in, d_out, n);
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("v0 atomicAdd", ms, result);
+
+    // ---------- v1: shared-memory tree, interleaved ----------
+    const int* d_res = nullptr;
+    ms = timeGpu([&] {
+        d_res = reduceMultiPass(reduceV1, BLOCK, d_in, d_bufA, d_bufB, n);
+    }, reps);
+    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+    printRow("v1 tree interleaved", ms, result);
+
+    CUDA_CHECK(cudaFree(d_in));
+    CUDA_CHECK(cudaFree(d_bufA));
+    CUDA_CHECK(cudaFree(d_bufB));
+    CUDA_CHECK(cudaFree(d_out));
+    return 0;
+}
