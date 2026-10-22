@@ -58,6 +58,42 @@ __global__ void matmulV1(const float* A, const float* B, float* C, int n)
 }
 
 // ============================================================
+// v2: tiled with shared memory
+//     each block loads TILE x TILE tiles of A and B into shared memory once,
+//     then every thread reuses them TILE times -> TILE x less global memory traffic
+// ============================================================
+__global__ void matmulV2(const float* A, const float* B, float* C, int n)
+{
+    __shared__ float As[TILE][TILE];
+    __shared__ float Bs[TILE][TILE];
+
+    const int tx  = threadIdx.x;
+    const int ty  = threadIdx.y;
+    const int row = blockIdx.y * TILE + ty;
+    const int col = blockIdx.x * TILE + tx;
+
+    float sum = 0.0f;
+    for (int t = 0; t < (n + TILE - 1) / TILE; t++) {
+        // 1. each thread loads ONE element of the A tile and ONE of the B tile (coalesced)
+        const int aCol = t * TILE + tx;
+        const int bRow = t * TILE + ty;
+        As[ty][tx] = (row < n && aCol < n) ? A[row * n + aCol] : 0.0f;
+        Bs[ty][tx] = (bRow < n && col < n) ? B[bRow * n + col] : 0.0f;
+        __syncthreads();   // the whole tile must be loaded before anyone uses it
+
+        // 2. partial dot product using only shared memory
+        for (int k = 0; k < TILE; k++) {
+            sum += As[ty][k] * Bs[k][tx];
+        }
+        __syncthreads();   // everyone must be done with this tile before it is overwritten
+    }
+
+    if (row < n && col < n) {
+        C[row * n + col] = sum;
+    }
+}
+
+// ============================================================
 // CPU baseline: i-k-j loop order (walks rows of B and C, which is cache-friendly)
 // ============================================================
 void matmulCPU(const float* A, const float* B, float* C, int n)
@@ -158,6 +194,11 @@ int main()
     CUDA_CHECK(cudaMemset(d_C, 0, bytes));
     ms = timeGpu([&] { matmulV1<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
     printRow("v1 naive (coalesced)", ms);
+
+    // ---------- v2: tiled, shared memory ----------
+    CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+    ms = timeGpu([&] { matmulV2<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
+    printRow("v2 tiled (shared mem)", ms);
 
     std::printf("\nGPU times are the median of 7 trials; CPU is a single run.\n");
 
