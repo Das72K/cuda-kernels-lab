@@ -20,6 +20,7 @@
     } while (0)
 
 constexpr int TILE = 16;  // each block is TILE x TILE threads
+constexpr float kTol = 1e-2f;   // max allowed abs error vs cuBLAS (FP32)
 
 // ============================================================
 // v0: naive, one thread per C element, BAD mapping:
@@ -249,6 +250,87 @@ float maxAbsDiff(const std::vector<float>& x, const std::vector<float>& y)
     return m;
 }
 
+// ============================================================
+// Size sweep: cuBLAS (FP32) vs v3 vs v4, correctness checked against cuBLAS
+// ============================================================
+void sizeSweep(cublasHandle_t handle)
+{
+    const int   sizes[] = {512, 1024, 2048, 4096};
+    const float alpha = 1.0f, beta = 0.0f;
+
+    std::printf("\nSize sweep: GFLOPS (%% of cuBLAS)\n");
+    std::printf("%8s %12s %22s %22s %6s\n", "n", "cuBLAS", "v3", "v4", "check");
+
+    for (int n : sizes) {
+        const size_t elems = size_t(n) * n;
+        const size_t bytes = elems * sizeof(float);
+        const double flops = 2.0 * n * n * n;
+        const int    reps  = (n <= 1024) ? 20 : 3;
+
+        std::vector<float> h_A(elems), h_B(elems), h_ref(elems), h_C(elems);
+        std::mt19937 rng(42);
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        for (float& x : h_A) x = dist(rng);
+        for (float& x : h_B) x = dist(rng);
+
+        float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_A, bytes));
+        CUDA_CHECK(cudaMalloc(&d_B, bytes));
+        CUDA_CHECK(cudaMalloc(&d_C, bytes));
+        CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), bytes, cudaMemcpyHostToDevice));
+
+        const float ms_ref = timeGpu([&] {
+            CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
+                                     &alpha, d_B, n, d_A, n, &beta, d_C, n));
+        }, reps);
+        CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+
+        const dim3 block(TILE, TILE);
+        const dim3 grid(n / BN, n / BM);
+
+        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+        const float ms3 = timeGpu([&] { matmulV3<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
+        CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+        const float err3 = maxAbsDiff(h_C, h_ref);
+
+        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+        const float ms4 = timeGpu([&] { matmulV4<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
+        CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+        const float err4 = maxAbsDiff(h_C, h_ref);
+
+        auto gf = [&](float ms) { return flops / (ms / 1000.0) / 1e9; };
+        std::printf("%8d %12.1f %13.1f (%5.1f%%) %13.1f (%5.1f%%) %6s\n",
+                    n, gf(ms_ref),
+                    gf(ms3), 100.0 * ms_ref / ms3,
+                    gf(ms4), 100.0 * ms_ref / ms4,
+                    (err3 < kTol && err4 < kTol) ? "PASS" : "FAIL");
+
+        CUDA_CHECK(cudaFree(d_A));
+        CUDA_CHECK(cudaFree(d_B));
+        CUDA_CHECK(cudaFree(d_C));
+    }
+}
+
+// Keeps the GPU busy for about `ms_target` ms so it reaches its boost clock before we time anything.
+// (Laptop GPUs drop to a low clock while idle, e.g. during the multi-second CPU baseline.)
+void gpuWarmup(cublasHandle_t handle, const float* d_A, const float* d_B, float* d_C, int n,
+               float ms_target = 500.0f)
+{
+    const float alpha = 1.0f, beta = 0.0f;
+    GpuTimer timer;
+    float elapsed = 0.0f;
+    while (elapsed < ms_target) {
+        timer.start();
+        for (int k = 0; k < 10; k++) {
+            CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
+                                     &alpha, d_B, n, d_A, n, &beta, d_C, n));
+        }
+        timer.stop();
+        elapsed += timer.elapsed_ms();
+    }
+}
+
 int main()
 {
     const int    n     = 2048;
@@ -256,7 +338,6 @@ int main()
     const size_t bytes = elems * sizeof(float);
     const double flops = 2.0 * n * n * n;   // one multiply + one add per (i, j, k)
     const int    reps  = 3;
-    const float  tol   = 1e-2f;             // floats: different summation order -> tiny differences
 
     // ---------- input: random floats in [-1, 1], fixed seed ----------
     std::vector<float> h_A(elems), h_B(elems), h_C(elems), h_ref(elems), h_cpu(elems);
@@ -283,6 +364,7 @@ int main()
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
     const float alpha = 1.0f, beta = 0.0f;
+    gpuWarmup(handle, d_A, d_B, d_C, n);
     // cuBLAS is column-major. Row-major C = A*B has the same memory layout as
     // column-major C^T = B^T * A^T, so we pass B first and A second.
     float cublas_ms = timeGpu([&] {
@@ -299,14 +381,14 @@ int main()
                 "version", "ms", "GFLOPS", "% cuBLAS", "max err", "check");
     std::printf("%-26s %10.1f %10.1f %9.2f%% %10.2e %6s\n", "CPU (1 core, ikj)",
                 cpu_ms, flops / (cpu_ms / 1000.0) / 1e9, 100.0 * cublas_ms / cpu_ms,
-                cpu_err, cpu_err < tol ? "PASS" : "FAIL");
+                cpu_err, cpu_err < kTol ? "PASS" : "FAIL");
 
-    auto printRow = [&](const char* name, float ms) {
+    auto printRow = [&](const char* name, float ms, float rowTol = kTol) {
         CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
         const float  err    = maxAbsDiff(h_C, h_ref);
         const double gflops = flops / (ms / 1000.0) / 1e9;
         std::printf("%-26s %10.3f %10.1f %9.1f%% %10.2e %6s\n", name, ms, gflops,
-                    100.0 * cublas_ms / ms, err, err < tol ? "PASS" : "FAIL");
+                    100.0 * cublas_ms / ms, err, err < rowTol ? "PASS" : "FAIL");
     };
 
     printRow("cuBLAS sgemm (reference)", cublas_ms);
@@ -349,7 +431,26 @@ int main()
         std::printf("v4 skipped: n must be a multiple of %d\n", BM);
     }
 
+    // ---------- diagnostic: re-measure FP32 cuBLAS on a warm GPU ----------
+    CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+    ms = timeGpu([&] {
+        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
+                                 &alpha, d_B, n, d_A, n, &beta, d_C, n));
+    }, reps);
+    printRow("cuBLAS FP32 (re-measured)", ms);
+
+    // ---------- cuBLAS with TF32 Tensor Cores (lower precision: 10-bit mantissa) ----------
+    CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH));
+    CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+    ms = timeGpu([&] {
+        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
+                                 &alpha, d_B, n, d_A, n, &beta, d_C, n));
+    }, reps);
+    printRow("cuBLAS TF32 Tensor Cores", ms, 1e-1f);   // looser tolerance: TF32 rounds inputs
+    CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH));
+
     std::printf("\nGPU times are the median of 7 trials; CPU is a single run.\n");
+    sizeSweep(handle);
 
     CUBLAS_CHECK(cublasDestroy(handle));
     CUDA_CHECK(cudaFree(d_A));

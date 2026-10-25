@@ -1,12 +1,21 @@
 n = 2048 (16.8 MB per matrix), 17.18 GFLOP per multiply, block = 16x16
 
 version                            ms     GFLOPS   % cuBLAS    max err  check
-CPU (1 core, ikj)              2634.4        6.5      0.10%   3.81e-05   PASS
-cuBLAS sgemm (reference)        2.696     6372.0     100.0%   0.00e+00   PASS
-v0 naive (uncoalesced)         85.007      202.1       3.2%   0.00e+00   PASS
-v1 naive (coalesced)           20.078      855.6      13.4%   0.00e+00   PASS
-v2 tiled (shared mem)          15.436     1113.0      17.5%   0.00e+00   PASS
-v3 register tiling 4x4          3.090     5559.7      87.3%   0.00e+00   PASS
-v4 float4 + transposed A        2.933     5857.3      91.9%   0.00e+00   PASS
+CPU (1 core, ikj)              2576.8        6.7      0.08%   3.81e-05   PASS
+cuBLAS sgemm (reference)        2.087     8230.9     100.0%   0.00e+00   PASS
+v0 naive (uncoalesced)         85.097      201.9       2.5%   0.00e+00   PASS
+v1 naive (coalesced)           20.163      852.1      10.4%   0.00e+00   PASS
+v2 tiled (shared mem)          15.492     1109.0      13.5%   0.00e+00   PASS
+v3 register tiling 4x4          3.093     5554.8      67.5%   0.00e+00   PASS
+v4 float4 + transposed A        2.950     5823.4      70.8%   0.00e+00   PASS
+cuBLAS FP32 (re-measured)       2.082     8249.7     100.2%   0.00e+00   PASS
+cuBLAS TF32 Tensor Cores        1.354    12684.4     154.1%   2.01e-02   PASS
 
 GPU times are the median of 7 trials; CPU is a single run.
+
+Size sweep: GFLOPS (% of cuBLAS)
+       n       cuBLAS                     v3                     v4  check
+     512       5180.7        3907.0 ( 75.4%)        4262.5 ( 82.3%)   PASS
+    1024       7597.2        5313.3 ( 69.9%)        5678.0 ( 74.7%)   PASS
+    2048       8272.8        5559.7 ( 67.2%)        5849.1 ( 70.7%)   PASS
+    4096       8481.4        5390.7 ( 63.6%)        5479.8 ( 64.6%)   PASS
