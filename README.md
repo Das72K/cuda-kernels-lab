@@ -8,10 +8,19 @@ Hand-written CUDA kernels, built up level by level and benchmarked.
 
 ```
 .
+├── CLAUDE.md
 ├── CMakeLists.txt
-├── common/                  # shared helpers (CUDA_CHECK, GpuTimer)
+├── common/
+│   ├── cuda_utils.h         # shared helpers (CUDA_CHECK, GpuTimer)
+│   └── bench_utils.h        # benchmark helpers (doNotOptimize, median timing)
+├── results/                 # saved benchmark output, one file per level
+│   ├── level1_vector_add.txt
+│   ├── level2_reduction.txt
+│   └── level3_matmul.txt
 └── src/
-    └── level1_vector_add/
+    ├── level1_vector_add/
+    ├── level2_reduction/
+    └── level3_matmul/
 ```
 
 ## Build
@@ -25,9 +34,14 @@ Binaries land in `build/bin/`. Kernels are compiled with `-lineinfo` so Nsight C
 
 ## Results
 
-| Level | Kernel | Problem size | Time (ms) | Throughput | % of peak | Notes |
-|-------|--------|--------------|-----------|------------|-----------|-------|
-|       |        |              |           |            |           |       |
+| Level | Workload | Bound by | Best own kernel | vs library | vs hardware spec |
+|---|---|---|---|---|---|
+| 1 Vector add | 100M floats | memory | ~170 GB/s | — | ~89% of 192 GB/s |
+| 2 Reduction | 33.5M ints | memory | v5: 184.6 GB/s | ≈ CUB (186.4 GB/s) | 96% of 192 GB/s |
+| 3 SGEMM | n = 2048, FP32 | compute | v4: 5.82 TFLOPS | 71% of cuBLAS | 37% of 15.9 TFLOPS* |
+
+\*Theoretical FP32 peak = 2560 cores × 2 FLOP × 3.105 GHz (max SM clock). A 140 W laptop GPU does not
+sustain its max clock under full load, so the achievable peak is lower; a measured-peak benchmark is planned.
 
 ## Level 1: Vector Add
 
@@ -123,3 +137,61 @@ the result exact, so GPU and CPU must match bit-for-bit.
 ```bash
 ./build/bin/level2_reduction
 ```
+
+## Level 3: Matrix multiplication (SGEMM, FP32)
+
+The kernels compute C = A·B for square FP32 matrices, n = 2048 (17.18 GFLOP), with random values in
+[-1, 1] (fixed seed); correctness is checked against cuBLAS with max abs error < 1e-2.
+
+**Test setup:** same hardware as Level 1; GPU times are the median of 7 trials after a 500 ms GPU
+warm-up; CPU is a single run (single-threaded i-k-j loop).
+
+| version                   |       ms |   GFLOPS | % cuBLAS |  max err | check |
+|---------------------------|---------:|---------:|---------:|---------:|:-----:|
+| CPU (1 core, ikj)         |   2576.8 |      6.7 |    0.08% | 3.81e-05 | PASS  |
+| cuBLAS sgemm (reference)  |    2.087 |   8230.9 |   100.0% | 0.00e+00 | PASS  |
+| v0 naive (uncoalesced)    |   85.097 |    201.9 |     2.5% | 0.00e+00 | PASS  |
+| v1 naive (coalesced)      |   20.163 |    852.1 |    10.4% | 0.00e+00 | PASS  |
+| v2 tiled (shared mem)     |   15.492 |   1109.0 |    13.5% | 0.00e+00 | PASS  |
+| v3 register tiling 4x4    |    3.093 |   5554.8 |    67.5% | 0.00e+00 | PASS  |
+| v4 float4 + transposed A  |    2.950 |   5823.4 |    70.8% | 0.00e+00 | PASS  |
+| cuBLAS FP32 (re-measured) |    2.082 |   8249.7 |   100.2% | 0.00e+00 | PASS  |
+| cuBLAS TF32 Tensor Cores  |    1.354 |  12684.4 |   154.1% | 2.01e-02 | PASS  |
+
+Size sweep: GFLOPS (% of cuBLAS)
+
+|    n | cuBLAS |             v3 |             v4 | check |
+|-----:|-------:|---------------:|---------------:|:-----:|
+|  512 | 5180.7 | 3907.0 (75.4%) | 4262.5 (82.3%) | PASS  |
+| 1024 | 7597.2 | 5313.3 (69.9%) | 5678.0 (74.7%) | PASS  |
+| 2048 | 8272.8 | 5559.7 (67.2%) | 5849.1 (70.7%) | PASS  |
+| 4096 | 8481.4 | 5390.7 (63.6%) | 5479.8 (64.6%) | PASS  |
+
+### Findings
+
+- **Coalescing (v0 → v1, 4.2×):** the only change is which thread index maps to rows and which to
+  columns. With `threadIdx.x` on columns, a warp reads consecutive addresses of B and C; with it on
+  rows, every thread touches a different 8 KB-apart row.
+- **Shared-memory tiling (v1 → v2, only 1.3×):** tiling cuts global-memory traffic 16×, but the inner
+  loop then needs two shared-memory loads per FMA. Shared memory serves roughly one warp-load per cycle
+  while the SM can issue four warp-FMAs, so the bottleneck moved from DRAM to shared memory.
+- **Register tiling (v2 → v3, 5.0×):** each thread computes a 4×4 block of C as an outer product of
+  4 A values and 4 B values held in registers: 8 shared loads per 16 FMAs instead of 2 per 1.
+  v3 reaches 5.55 TFLOPS, 67.5% of cuBLAS.
+- **Vectorized shared loads (v3 → v4, 1.05×):** storing the A tile transposed (padded by 4 floats to
+  avoid bank conflicts) allows two `float4` loads per k-step instead of eight scalar loads.
+  v4 reaches 5.82 TFLOPS, 70.8% of cuBLAS.
+- **The gap to cuBLAS grows with size:** v4 is at 82% of cuBLAS at n = 512 but 65% at n = 4096.
+  cuBLAS keeps scaling while v4 peaks at n = 2048; larger per-thread tiles and double buffering
+  (not implemented) are the likely difference, to be confirmed with Nsight Compute.
+- **Tensor Cores:** cuBLAS in TF32 mode reaches 12.7 TFLOPS (1.54× FP32 cuBLAS) at the cost of
+  precision (max error 2.0e-2 vs 0 for FP32).
+- **A measurement pitfall:** without a warm-up, the first cuBLAS run (after the multi-second CPU
+  baseline left the GPU idle and down-clocked) measured 2.70 ms instead of 2.09 ms, making every
+  kernel look ~20 percentage points closer to cuBLAS than it is. A 500 ms warm-up fixed it.
+
+## How this project was built
+
+The code was developed with AI assistance (Claude), acting as a mentor and pair programmer.
+All experiments were run on my hardware, and I verified, analyzed and interpreted every result;
+I can explain every design decision.
