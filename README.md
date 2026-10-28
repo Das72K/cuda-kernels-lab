@@ -192,6 +192,12 @@ Size sweep: GFLOPS (% of cuBLAS)
   baseline left the GPU idle and down-clocked) measured 2.70 ms instead of 2.09 ms, making every
   kernel look ~20 percentage points closer to cuBLAS than it is. A 500 ms warm-up fixed it.
 
+### How to run
+
+```bash
+./build/bin/level3_matmul
+```
+
 ## How this project was built
 
 The code was developed with AI assistance (Claude), acting as a mentor and pair programmer.
