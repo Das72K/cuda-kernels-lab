@@ -10,6 +10,7 @@ Hand-written CUDA kernels, built up level by level and benchmarked.
 
 ```
 .
+├── bench/                   # peak microbenchmarks (achievable bandwidth and FP32 FMA throughput)
 ├── CLAUDE.md
 ├── CMakeLists.txt
 ├── common/
