@@ -1,5 +1,7 @@
 # cuda-kernels-lab
 
+[![build](https://github.com/Das72K/cuda-kernels-lab/actions/workflows/build.yml/badge.svg)](https://github.com/Das72K/cuda-kernels-lab/actions/workflows/build.yml)
+
 Hand-written CUDA kernels, built up level by level and benchmarked.
 
 **Target:** NVIDIA GeForce RTX 4050 Laptop GPU (Ada, `sm_89`)

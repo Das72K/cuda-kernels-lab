@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    # GitHub runners have no GPU: this job only checks that every level compiles.
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:13.3.1-devel-ubuntu24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake make g++
+
+      - name: Show tool versions
+        run: |
+          nvcc --version
+          cmake --version
+          g++ --version
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
