@@ -224,12 +224,8 @@ int main(int argc, char** argv)
         x = dist(rng);
     }
 
-    // ---------- CPU baseline (also the reference result) ----------
-    const long long    cpu_sum = sumCPU(h_in.data(), n);
-    const bench::Stats cpu     = bench::timeCpu([&] {
-        long long s = sumCPU(h_in.data(), n);
-        bench::doNotOptimize(s);
-    });
+    // ---------- CPU reference result (untimed; the CPU is timed after all GPU measurements) ----------
+    const long long cpu_sum = sumCPU(h_in.data(), n);
 
     // ---------- GPU buffers ----------
     const int maxBlocks = (n + BLOCK - 1) / BLOCK;
@@ -243,6 +239,14 @@ int main(int argc, char** argv)
     int        result = 0;
     const int* d_res  = nullptr;
 
+    // GPU results are buffered and printed after the CPU timing
+    struct GpuRow {
+        const char*  name;
+        bench::Stats t;
+        long long    sum;
+    };
+    std::vector<GpuRow> gpuRows;
+
     // ---------- library reference first (CUB), so every row can report % of library ----------
     void*  d_temp     = nullptr;
     size_t temp_bytes = 0;
@@ -253,6 +257,35 @@ int main(int argc, char** argv)
     });
     CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
     const int cub_result = result;
+    gpuRows.push_back({"CUB DeviceReduce::Sum", cub_t, cub_result});
+
+    // ---------- v0: atomics ----------
+    const bench::Stats t0 = bench::timeGpu([&] {
+        CUDA_CHECK(cudaMemsetAsync(d_out, 0, sizeof(int)));   // reset the counter each run
+        reduceV0Atomic<<<maxBlocks, BLOCK>>>(d_in, d_out, n);
+    });
+    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
+    gpuRows.push_back({"v0 atomicAdd", t0, result});
+
+    // ---------- v1..v5: multi-pass tree reductions ----------
+    auto runTree = [&](const char* name, ReduceKernel kernel, int elemsPerBlock) {
+        const bench::Stats t = bench::timeGpu([&] {
+            d_res = reduceMultiPass(kernel, elemsPerBlock, d_in, d_bufA, d_bufB, n);
+        });
+        CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+        gpuRows.push_back({name, t, result});
+    };
+    runTree("v1 tree interleaved",  reduceV1, BLOCK);
+    runTree("v2 tree strided",      reduceV2, BLOCK);
+    runTree("v3 tree sequential",   reduceV3, BLOCK);
+    runTree("v4 first add on load", reduceV4, 2 * BLOCK);
+    runTree("v5 warp shuffle",      reduceV5, 2 * BLOCK);
+
+    // ---------- CPU baseline, timed after all GPU measurements ----------
+    const bench::Stats cpu = bench::timeCpu([&] {
+        long long s = sumCPU(h_in.data(), n);
+        bench::doNotOptimize(s);
+    });
 
     // ---------- results table + CSV ----------
     bench::CsvWriter csv(csvPath);
@@ -289,29 +322,9 @@ int main(int argc, char** argv)
     };
 
     report("CPU (1 core)", cpu, cpu_sum, false);
-    report("CUB DeviceReduce::Sum", cub_t, cub_result, true);
-
-    // ---------- v0: atomics ----------
-    const bench::Stats t0 = bench::timeGpu([&] {
-        CUDA_CHECK(cudaMemsetAsync(d_out, 0, sizeof(int)));   // reset the counter each run
-        reduceV0Atomic<<<maxBlocks, BLOCK>>>(d_in, d_out, n);
-    });
-    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
-    report("v0 atomicAdd", t0, result, true);
-
-    // ---------- v1..v5: multi-pass tree reductions ----------
-    auto runTree = [&](const char* name, ReduceKernel kernel, int elemsPerBlock) {
-        const bench::Stats t = bench::timeGpu([&] {
-            d_res = reduceMultiPass(kernel, elemsPerBlock, d_in, d_bufA, d_bufB, n);
-        });
-        CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
-        report(name, t, result, true);
-    };
-    runTree("v1 tree interleaved",  reduceV1, BLOCK);
-    runTree("v2 tree strided",      reduceV2, BLOCK);
-    runTree("v3 tree sequential",   reduceV3, BLOCK);
-    runTree("v4 first add on load", reduceV4, 2 * BLOCK);
-    runTree("v5 warp shuffle",      reduceV5, 2 * BLOCK);
+    for (const GpuRow& r : gpuRows) {
+        report(r.name, r.t, r.sum, true);
+    }
 
     CUDA_CHECK(cudaFree(d_temp));
     CUDA_CHECK(cudaFree(d_in));

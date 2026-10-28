@@ -14,8 +14,9 @@ Hand-written CUDA kernels, built up level by level and benchmarked.
 ├── CMakeLists.txt
 ├── common/
 │   ├── cuda_utils.h         # shared helpers (CUDA_CHECK, GpuTimer)
-│   └── bench_utils.h        # benchmark helpers (doNotOptimize, median timing)
+│   └── bench.h              # benchmark framework: warm-up, median + p10/p90, peaks, CSV
 ├── results/                 # saved benchmark output, one file per level
+│   ├── raw/                 # machine-readable CSV, one file per level
 │   ├── level1_vector_add.txt
 │   ├── level2_reduction.txt
 │   └── level3_matmul.txt

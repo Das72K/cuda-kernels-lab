@@ -2,11 +2,12 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <cublas_v2.h>
 
-#include "bench_utils.h"
+#include "bench.h"
 #include "cuda_utils.h"
 
 #define CUBLAS_CHECK(call)                                                          \
@@ -253,7 +254,7 @@ float maxAbsDiff(const std::vector<float>& x, const std::vector<float>& y)
 // ============================================================
 // Size sweep: cuBLAS (FP32) vs v3 vs v4, correctness checked against cuBLAS
 // ============================================================
-void sizeSweep(cublasHandle_t handle)
+void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::DeviceInfo& dev)
 {
     const int   sizes[] = {512, 1024, 2048, 4096};
     const float alpha = 1.0f, beta = 0.0f;
@@ -265,7 +266,6 @@ void sizeSweep(cublasHandle_t handle)
         const size_t elems = size_t(n) * n;
         const size_t bytes = elems * sizeof(float);
         const double flops = 2.0 * n * n * n;
-        const int    reps  = (n <= 1024) ? 20 : 3;
 
         std::vector<float> h_A(elems), h_B(elems), h_ref(elems), h_C(elems);
         std::mt19937 rng(42);
@@ -280,31 +280,48 @@ void sizeSweep(cublasHandle_t handle)
         CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), bytes, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), bytes, cudaMemcpyHostToDevice));
 
-        const float ms_ref = timeGpu([&] {
+        const bench::Stats ref = bench::timeGpu([&] {
             CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
                                      &alpha, d_B, n, d_A, n, &beta, d_C, n));
-        }, reps);
+        });
         CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));
 
         const dim3 block(TILE, TILE);
         const dim3 grid(n / BN, n / BM);
 
         CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        const float ms3 = timeGpu([&] { matmulV3<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
+        const bench::Stats s3 = bench::timeGpu([&] { matmulV3<<<grid, block>>>(d_A, d_B, d_C, n); });
         CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
         const float err3 = maxAbsDiff(h_C, h_ref);
 
         CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        const float ms4 = timeGpu([&] { matmulV4<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
+        const bench::Stats s4 = bench::timeGpu([&] { matmulV4<<<grid, block>>>(d_A, d_B, d_C, n); });
         CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
         const float err4 = maxAbsDiff(h_C, h_ref);
 
-        auto gf = [&](float ms) { return flops / (ms / 1000.0) / 1e9; };
+        auto gf = [&](const bench::Stats& t) { return flops / (t.median / 1e3) / 1e9; };
         std::printf("%8d %12.1f %13.1f (%5.1f%%) %13.1f (%5.1f%%) %6s\n",
-                    n, gf(ms_ref),
-                    gf(ms3), 100.0 * ms_ref / ms3,
-                    gf(ms4), 100.0 * ms_ref / ms4,
+                    n, gf(ref),
+                    gf(s3), 100.0 * ref.median / s3.median,
+                    gf(s4), 100.0 * ref.median / s4.median,
                     (err3 < kTol && err4 < kTol) ? "PASS" : "FAIL");
+
+        auto row = [&](const char* name, const bench::Stats& t, float err) {
+            bench::Row r;
+            r.level       = "3_matmul_sweep";
+            r.kernel      = name;
+            r.n           = n;
+            r.t           = t;
+            r.flops       = flops;
+            r.peak_gflops = dev.peak_gflops;
+            r.lib_ms      = ref.median;
+            r.max_err     = err;
+            r.pass        = err < kTol;
+            csv.write(r);
+        };
+        row("cuBLAS sgemm", ref, 0.0f);
+        row("v3 register tiling 4x4", s3, err3);
+        row("v4 float4 + transposed A", s4, err4);
 
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
@@ -312,32 +329,16 @@ void sizeSweep(cublasHandle_t handle)
     }
 }
 
-// Keeps the GPU busy for about `ms_target` ms so it reaches its boost clock before we time anything.
-// (Laptop GPUs drop to a low clock while idle, e.g. during the multi-second CPU baseline.)
-void gpuWarmup(cublasHandle_t handle, const float* d_A, const float* d_B, float* d_C, int n,
-               float ms_target = 500.0f)
+int main(int argc, char** argv)
 {
-    const float alpha = 1.0f, beta = 0.0f;
-    GpuTimer timer;
-    float elapsed = 0.0f;
-    while (elapsed < ms_target) {
-        timer.start();
-        for (int k = 0; k < 10; k++) {
-            CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
-                                     &alpha, d_B, n, d_A, n, &beta, d_C, n));
-        }
-        timer.stop();
-        elapsed += timer.elapsed_ms();
-    }
-}
+    const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
+    const bench::DeviceInfo dev     = bench::queryDevice();
+    bench::printDevice(dev);
 
-int main()
-{
     const int    n     = 2048;
     const size_t elems = size_t(n) * n;
     const size_t bytes = elems * sizeof(float);
     const double flops = 2.0 * n * n * n;   // one multiply + one add per (i, j, k)
-    const int    reps  = 3;
 
     // ---------- input: random floats in [-1, 1], fixed seed ----------
     std::vector<float> h_A(elems), h_B(elems), h_C(elems), h_ref(elems), h_cpu(elems);
@@ -345,12 +346,6 @@ int main()
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     for (float& x : h_A) x = dist(rng);
     for (float& x : h_B) x = dist(rng);
-
-    // ---------- CPU baseline: one run only (it takes seconds) ----------
-    auto t0 = std::chrono::high_resolution_clock::now();
-    matmulCPU(h_A.data(), h_B.data(), h_cpu.data(), n);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    const double cpu_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     // ---------- GPU buffers ----------
     float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
@@ -364,93 +359,99 @@ int main()
     cublasHandle_t handle;
     CUBLAS_CHECK(cublasCreate(&handle));
     const float alpha = 1.0f, beta = 0.0f;
-    gpuWarmup(handle, d_A, d_B, d_C, n);
     // cuBLAS is column-major. Row-major C = A*B has the same memory layout as
     // column-major C^T = B^T * A^T, so we pass B first and A second.
-    float cublas_ms = timeGpu([&] {
+    auto cublasRun = [&] {
         CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
                                  &alpha, d_B, n, d_A, n, &beta, d_C, n));
-    }, reps);
+    };
+    const bench::Stats ref = bench::timeGpu(cublasRun);
     CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));
-    const float cpu_err = maxAbsDiff(h_cpu, h_ref);
 
-    // ---------- results table ----------
-    std::printf("n = %d (%.1f MB per matrix), %.2f GFLOP per multiply, block = %dx%d\n\n",
+    // ---------- results table + CSV ----------
+    bench::CsvWriter csv(csvPath);
+    std::printf("\nn = %d (%.1f MB per matrix), %.2f GFLOP per multiply, block = %dx%d\n",
                 n, bytes / 1e6, flops / 1e9, TILE, TILE);
-    std::printf("%-26s %10s %10s %10s %10s %6s\n",
-                "version", "ms", "GFLOPS", "% cuBLAS", "max err", "check");
-    std::printf("%-26s %10.1f %10.1f %9.2f%% %10.2e %6s\n", "CPU (1 core, ikj)",
-                cpu_ms, flops / (cpu_ms / 1000.0) / 1e9, 100.0 * cublas_ms / cpu_ms,
-                cpu_err, cpu_err < kTol ? "PASS" : "FAIL");
+    std::printf("Times: median of %d trials (p10/p90 spread); %%peak uses the driver-reported clock\n\n",
+                bench::TimingConfig{}.trials);
+    std::printf("%-26s %10s %10s %10s %10s %7s %9s %10s %6s\n",
+                "version", "ms", "p10", "p90", "GFLOPS", "%peak", "% cuBLAS", "max err", "check");
 
-    auto printRow = [&](const char* name, float ms, float rowTol = kTol) {
-        CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
-        const float  err    = maxAbsDiff(h_C, h_ref);
-        const double gflops = flops / (ms / 1000.0) / 1e9;
-        std::printf("%-26s %10.3f %10.1f %9.1f%% %10.2e %6s\n", name, ms, gflops,
-                    100.0 * cublas_ms / ms, err, err < rowTol ? "PASS" : "FAIL");
+    auto report = [&](const char* name, const bench::Stats& t, float err, float rowTol, bool onGpu,
+                      bool fp32Peak = true) {
+        const double gflops = flops / (t.median / 1e3) / 1e9;
+        char pk[16];
+        if (onGpu && fp32Peak) {
+            std::snprintf(pk, sizeof pk, "%.1f%%", 100.0 * gflops / dev.peak_gflops);
+        } else {
+            std::snprintf(pk, sizeof pk, "-");
+        }
+        std::printf("%-26s %10.3f %10.3f %10.3f %10.1f %7s %8.1f%% %10.2e %6s\n",
+                    name, t.median, t.p10, t.p90, gflops, pk, 100.0 * ref.median / t.median,
+                    err, err < rowTol ? "PASS" : "FAIL");
+
+        bench::Row row;
+        row.level       = "3_matmul";
+        row.kernel      = name;
+        row.n           = n;
+        row.t           = t;
+        row.flops       = flops;
+        row.peak_gflops = (onGpu && fp32Peak) ? dev.peak_gflops : 0.0;
+        row.lib_ms      = onGpu ? ref.median : 0.0;
+        row.max_err     = err;
+        row.pass        = err < rowTol;
+        csv.write(row);
     };
 
-    printRow("cuBLAS sgemm (reference)", cublas_ms);
+    // error of whatever is in d_C right now, against the cuBLAS reference
+    auto errOfDC = [&] {
+        CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+        return maxAbsDiff(h_C, h_ref);
+    };
+
+    // reset d_C so a kernel that writes nothing can't "pass" with old results, time it, check it
+    auto runKernel = [&](const char* name, auto launch) {
+        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+        const bench::Stats t = bench::timeGpu(launch);
+        report(name, t, errOfDC(), kTol, true);
+    };
+
+    report("cuBLAS sgemm (reference)", ref, 0.0f, kTol, true);
 
     const dim3 block(TILE, TILE);
     const dim3 grid((n + TILE - 1) / TILE, (n + TILE - 1) / TILE);
+    runKernel("v0 naive (uncoalesced)", [&] { matmulV0<<<grid, block>>>(d_A, d_B, d_C, n); });
+    runKernel("v1 naive (coalesced)",   [&] { matmulV1<<<grid, block>>>(d_A, d_B, d_C, n); });
+    runKernel("v2 tiled (shared mem)",  [&] { matmulV2<<<grid, block>>>(d_A, d_B, d_C, n); });
 
-    // ---------- v0: naive, uncoalesced ----------
-    CUDA_CHECK(cudaMemset(d_C, 0, bytes));   // a broken kernel must not "pass" with old results
-    float ms = timeGpu([&] { matmulV0<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
-    printRow("v0 naive (uncoalesced)", ms);
-
-    // ---------- v1: naive, coalesced ----------
-    CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-    ms = timeGpu([&] { matmulV1<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
-    printRow("v1 naive (coalesced)", ms);
-
-    // ---------- v2: tiled, shared memory ----------
-    CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-    ms = timeGpu([&] { matmulV2<<<grid, block>>>(d_A, d_B, d_C, n); }, reps);
-    printRow("v2 tiled (shared mem)", ms);
-
-    // ---------- v3: 2D register tiling (64x64 block tile, 4x4 per thread) ----------
     if (n % BM == 0 && n % BN == 0 && n % BK == 0) {
-        const dim3 grid3(n / BN, n / BM);
-        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        ms = timeGpu([&] { matmulV3<<<grid3, block>>>(d_A, d_B, d_C, n); }, reps);
-        printRow("v3 register tiling 4x4", ms);
+        const dim3 gridT(n / BN, n / BM);
+        runKernel("v3 register tiling 4x4",   [&] { matmulV3<<<gridT, block>>>(d_A, d_B, d_C, n); });
+        runKernel("v4 float4 + transposed A", [&] { matmulV4<<<gridT, block>>>(d_A, d_B, d_C, n); });
     } else {
-        std::printf("v3 skipped: n must be a multiple of %d\n", BM);
+        std::printf("v3/v4 skipped: n must be a multiple of %d\n", BM);
     }
-
-    // ---------- v4: v3 + float4 shared-memory reads, transposed + padded A tile ----------
-    if (n % BM == 0 && n % BN == 0 && n % BK == 0) {
-        const dim3 grid4(n / BN, n / BM);
-        CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        ms = timeGpu([&] { matmulV4<<<grid4, block>>>(d_A, d_B, d_C, n); }, reps);
-        printRow("v4 float4 + transposed A", ms);
-    } else {
-        std::printf("v4 skipped: n must be a multiple of %d\n", BM);
-    }
-
-    // ---------- diagnostic: re-measure FP32 cuBLAS on a warm GPU ----------
-    CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-    ms = timeGpu([&] {
-        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
-                                 &alpha, d_B, n, d_A, n, &beta, d_C, n));
-    }, reps);
-    printRow("cuBLAS FP32 (re-measured)", ms);
 
     // ---------- cuBLAS with TF32 Tensor Cores (lower precision: 10-bit mantissa) ----------
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH));
     CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-    ms = timeGpu([&] {
-        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
-                                 &alpha, d_B, n, d_A, n, &beta, d_C, n));
-    }, reps);
-    printRow("cuBLAS TF32 Tensor Cores", ms, 1e-1f);   // looser tolerance: TF32 rounds inputs
+    const bench::Stats tf32 = bench::timeGpu(cublasRun);
+    report("cuBLAS TF32 Tensor Cores", tf32, errOfDC(), 1e-1f, true, false);   // looser tolerance: TF32 rounds inputs
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH));
 
-    std::printf("\nGPU times are the median of 7 trials; CPU is a single run.\n");
-    sizeSweep(handle);
+    sizeSweep(handle, csv, dev);
+
+    // ---------- CPU baseline: one run takes seconds, so 5 trials of one run each ----------
+    bench::TimingConfig cpuCfg = bench::cpuDefaults();
+    cpuCfg.trials = 5;
+    const bench::Stats cpu = bench::timeCpu([&] {
+        matmulCPU(h_A.data(), h_B.data(), h_cpu.data(), n);
+        bench::doNotOptimize(h_cpu[0]);
+    }, cpuCfg);
+    const float cpu_err = maxAbsDiff(h_cpu, h_ref);
+
+    std::printf("\nCPU baseline (timed after all GPU measurements):\n");
+    report("CPU (1 core, ikj)", cpu, cpu_err, kTol, false);
 
     CUBLAS_CHECK(cublasDestroy(handle));
     CUDA_CHECK(cudaFree(d_A));
