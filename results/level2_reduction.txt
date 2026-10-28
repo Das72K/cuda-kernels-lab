@@ -1,13 +1,15 @@
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU (sm_89), 20 SMs, L2 24 MB
+Theoretical peaks: DRAM 192.0 GB/s (96-bit, 8.001 GHz x 2), FP32 10521.6 GFLOPS at driver-reported clock (20 SMs x 128 lanes x 2 x 2.055 GHz)
+
 n = 33554432 (134.2 MB), block = 256 threads, CPU sum = 151006621
+Times: median of 15 trials (p10/p90 spread), after a time-based GPU warm-up
 
-version                        ms       GB/s    vs CPU          sum  check
-CPU (1 core)              10.3878       12.9       1.0    151006621    ref
-v0 atomicAdd               0.7198      186.5      14.4    151006621   PASS
-v1 tree interleaved        2.1376       62.8       4.9    151006621   PASS
-v2 tree strided            1.2471      107.6       8.3    151006621   PASS
-v3 tree sequential         1.2031      111.6       8.6    151006621   PASS
-v4 first add on load       0.7302      183.8      14.2    151006621   PASS
-v5 warp shuffle            0.7270      184.6      14.3    151006621   PASS
-CUB DeviceReduce::Sum      0.7201      186.4      14.4    151006621   PASS
-
-Times are the median of 7 trials. Peak DRAM bandwidth (spec): 192 GB/s
+version                       ms       p10       p90     GB/s   %peak   vs CPU          sum  check
+CPU (1 core)             11.8035    9.8894   13.3083     11.4       -      1.0    151006621   PASS
+CUB DeviceReduce::Sum     0.7235    0.7201    0.7281    185.5   96.6%     16.3    151006621   PASS
+v0 atomicAdd              0.7237    0.7185    0.7290    185.5   96.6%     16.3    151006621   PASS
+v1 tree interleaved       1.7949    1.7871    1.7985     74.8   38.9%      6.6    151006621   PASS
+v2 tree strided           1.2561    1.2506    1.2711    106.9   55.6%      9.4    151006621   PASS
+v3 tree sequential        1.2103    1.2091    1.2156    110.9   57.8%      9.8    151006621   PASS
+v4 first add on load      0.7297    0.7273    0.7380    183.9   95.8%     16.2    151006621   PASS
+v5 warp shuffle           0.7292    0.7266    0.7337    184.1   95.9%     16.2    151006621   PASS

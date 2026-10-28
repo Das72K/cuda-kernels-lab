@@ -1,12 +1,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <cub/cub.cuh>
 
-#include "bench_utils.h"
+#include "bench.h"
 #include "cuda_utils.h"
 
 constexpr int BLOCK = 256;  // threads per block (power of 2, needed by the tree)
@@ -205,13 +207,16 @@ const int* reduceMultiPass(ReduceKernel kernel, int elemsPerBlock,
     return src;
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    const int    n     = 1 << 25;                    // 33.5M ints = 128 MB (much bigger than L2)
-    const size_t bytes = size_t(n) * sizeof(int);
-    const int    reps  = 20;
+    const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
+    const bench::DeviceInfo dev     = bench::queryDevice();
+    bench::printDevice(dev);
 
-    // ---------- input: random digits 0..9, fixed seed so every run is identical ----------
+    const int    n     = 1 << 25;                    // 33.5M ints = 134 MB (much bigger than L2)
+    const size_t bytes = size_t(n) * sizeof(int);
+
+    // ---------- input: random digits 0..9, fixed seed ----------
     std::vector<int> h_in(n);
     std::mt19937 rng(42);
     std::uniform_int_distribution<int> dist(0, 9);
@@ -220,19 +225,11 @@ int main()
     }
 
     // ---------- CPU baseline (also the reference result) ----------
-    const long long cpu_sum = sumCPU(h_in.data(), n);   // warm-up + reference
-    std::vector<double> cpu_times;
-    for (int t = 0; t < 7; t++) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        for (int k = 0; k < reps; k++) {
-            long long s = sumCPU(h_in.data(), n);
-            doNotOptimize(s);
-        }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        cpu_times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count() / reps);
-    }
-    std::sort(cpu_times.begin(), cpu_times.end());
-    const double cpu_ms = cpu_times[cpu_times.size() / 2];
+    const long long    cpu_sum = sumCPU(h_in.data(), n);
+    const bench::Stats cpu     = bench::timeCpu([&] {
+        long long s = sumCPU(h_in.data(), n);
+        bench::doNotOptimize(s);
+    });
 
     // ---------- GPU buffers ----------
     const int maxBlocks = (n + BLOCK - 1) / BLOCK;
@@ -243,79 +240,80 @@ int main()
     CUDA_CHECK(cudaMalloc(&d_out, sizeof(int)));
     CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), bytes, cudaMemcpyHostToDevice));
 
-    // ---------- results table ----------
-    std::printf("n = %d (%.1f MB), block = %d threads, CPU sum = %lld\n\n",
-                n, bytes / 1e6, BLOCK, cpu_sum);
-    std::printf("%-22s %10s %10s %9s %12s %6s\n", "version", "ms", "GB/s", "vs CPU", "sum", "check");
-    std::printf("%-22s %10.4f %10.1f %9s %12lld %6s\n", "CPU (1 core)", cpu_ms,
-                bytes / (cpu_ms / 1000.0) / 1e9, "1.0", cpu_sum, "ref");
+    int        result = 0;
+    const int* d_res  = nullptr;
 
-    auto printRow = [&](const char* name, float ms, long long result) {
-        double gbps = bytes / (ms / 1000.0) / 1e9;
-        std::printf("%-22s %10.4f %10.1f %9.1f %12lld %6s\n", name, ms, gbps, cpu_ms / ms,
-                    result, result == cpu_sum ? "PASS" : "FAIL");
-    };
-
-    int result = 0;
-
-    // ---------- v0: atomics ----------
-    float ms = timeGpu([&] {
-        CUDA_CHECK(cudaMemsetAsync(d_out, 0, sizeof(int)));   // reset the counter each run
-        reduceV0Atomic<<<maxBlocks, BLOCK>>>(d_in, d_out, n);
-    }, reps);
-    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("v0 atomicAdd", ms, result);
-
-    // ---------- v1: shared-memory tree, interleaved ----------
-    const int* d_res = nullptr;
-    ms = timeGpu([&] {
-        d_res = reduceMultiPass(reduceV1, BLOCK, d_in, d_bufA, d_bufB, n);
-    }, reps);
-    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("v1 tree interleaved", ms, result);
-
-    // ---------- v2: shared-memory tree, strided index ----------
-    ms = timeGpu([&] {
-        d_res = reduceMultiPass(reduceV2, BLOCK, d_in, d_bufA, d_bufB, n);
-    }, reps);
-    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("v2 tree strided", ms, result);
-
-    // ---------- v3: shared-memory tree, sequential addressing ----------
-    ms = timeGpu([&] {
-        d_res = reduceMultiPass(reduceV3, BLOCK, d_in, d_bufA, d_bufB, n);
-    }, reps);
-    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("v3 tree sequential", ms, result);
-
-    // ---------- v4: first add during load (2 * BLOCK elements per block) ----------
-    ms = timeGpu([&] {
-        d_res = reduceMultiPass(reduceV4, 2 * BLOCK, d_in, d_bufA, d_bufB, n);
-    }, reps);
-    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("v4 first add on load", ms, result);
-
-    // ---------- v5: v4 + warp shuffle for the last warp ----------
-    ms = timeGpu([&] {
-        d_res = reduceMultiPass(reduceV5, 2 * BLOCK, d_in, d_bufA, d_bufB, n);
-    }, reps);
-    CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("v5 warp shuffle", ms, result);
-
-    // ---------- reference: NVIDIA CUB library ----------
+    // ---------- library reference first (CUB), so every row can report % of library ----------
     void*  d_temp     = nullptr;
     size_t temp_bytes = 0;
-    CUDA_CHECK(cub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n));   // query scratch size
+    CUDA_CHECK(cub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n));
     CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
-    ms = timeGpu([&] {
+    const bench::Stats cub_t = bench::timeGpu([&] {
         CUDA_CHECK(cub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n));
-    }, reps);
+    });
     CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
-    printRow("CUB DeviceReduce::Sum", ms, result);
+    const int cub_result = result;
+
+    // ---------- results table + CSV ----------
+    bench::CsvWriter csv(csvPath);
+    std::printf("\nn = %d (%.1f MB), block = %d threads, CPU sum = %lld\n", n, bytes / 1e6, BLOCK, cpu_sum);
+    std::printf("Times: median of %d trials (p10/p90 spread), after a time-based GPU warm-up\n\n",
+                bench::TimingConfig{}.trials);
+    std::printf("%-22s %9s %9s %9s %8s %7s %8s %12s %6s\n",
+                "version", "ms", "p10", "p90", "GB/s", "%peak", "vs CPU", "sum", "check");
+
+    auto report = [&](const char* name, const bench::Stats& t, long long sum, bool onGpu) {
+        const double gbps = bytes / (t.median / 1e3) / 1e9;
+        const bool   pass = (sum == cpu_sum);
+        char pct[16];
+        if (onGpu) {
+            std::snprintf(pct, sizeof pct, "%.1f%%", 100.0 * gbps / dev.peak_gbps);
+        } else {
+            std::snprintf(pct, sizeof pct, "-");
+        }
+        std::printf("%-22s %9.4f %9.4f %9.4f %8.1f %7s %8.1f %12lld %6s\n",
+                    name, t.median, t.p10, t.p90, gbps, pct, cpu.median / t.median, sum,
+                    pass ? "PASS" : "FAIL");
+
+        bench::Row row;
+        row.level     = "2_reduction";
+        row.kernel    = name;
+        row.n         = n;
+        row.t         = t;
+        row.bytes     = static_cast<double>(bytes);
+        row.peak_gbps = onGpu ? dev.peak_gbps : 0.0;
+        row.lib_ms    = onGpu ? cub_t.median : 0.0;
+        row.max_err   = static_cast<double>(std::llabs(sum - cpu_sum));
+        row.pass      = pass;
+        csv.write(row);
+    };
+
+    report("CPU (1 core)", cpu, cpu_sum, false);
+    report("CUB DeviceReduce::Sum", cub_t, cub_result, true);
+
+    // ---------- v0: atomics ----------
+    const bench::Stats t0 = bench::timeGpu([&] {
+        CUDA_CHECK(cudaMemsetAsync(d_out, 0, sizeof(int)));   // reset the counter each run
+        reduceV0Atomic<<<maxBlocks, BLOCK>>>(d_in, d_out, n);
+    });
+    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
+    report("v0 atomicAdd", t0, result, true);
+
+    // ---------- v1..v5: multi-pass tree reductions ----------
+    auto runTree = [&](const char* name, ReduceKernel kernel, int elemsPerBlock) {
+        const bench::Stats t = bench::timeGpu([&] {
+            d_res = reduceMultiPass(kernel, elemsPerBlock, d_in, d_bufA, d_bufB, n);
+        });
+        CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
+        report(name, t, result, true);
+    };
+    runTree("v1 tree interleaved",  reduceV1, BLOCK);
+    runTree("v2 tree strided",      reduceV2, BLOCK);
+    runTree("v3 tree sequential",   reduceV3, BLOCK);
+    runTree("v4 first add on load", reduceV4, 2 * BLOCK);
+    runTree("v5 warp shuffle",      reduceV5, 2 * BLOCK);
+
     CUDA_CHECK(cudaFree(d_temp));
-
-    std::printf("\nTimes are the median of 7 trials. Peak DRAM bandwidth (spec): 192 GB/s\n");
-
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_bufA));
     CUDA_CHECK(cudaFree(d_bufB));
