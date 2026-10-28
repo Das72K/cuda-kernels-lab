@@ -38,7 +38,7 @@ Binaries land in `build/bin/`. Kernels are compiled with `-lineinfo` so Nsight C
 
 | Level | Workload | Bound by | Best own kernel | vs library | vs hardware spec |
 |---|---|---|---|---|---|
-| 1 Vector add | 100M floats | memory | ~170 GB/s | — | ~89% of 192 GB/s |
+| 1 Vector add | 50M floats | memory | 171.1 GB/s | — | 89% of 192 GB/s |
 | 2 Reduction | 33.5M ints | memory | v5: 184.6 GB/s | ≈ CUB (186.4 GB/s) | 96% of 192 GB/s |
 | 3 SGEMM | n = 2048, FP32 | compute | v4: 5.82 TFLOPS | 71% of cuBLAS | 37% of 15.9 TFLOPS* |
 
@@ -65,7 +65,7 @@ laptop plugged in. CPU baseline = single-threaded loop.
 ### Findings
 
 - **Kernel bandwidth and the L2 cache effect:** For large arrays (10M–50M elements) the kernel
-  reaches ~170 GB/s, roughly 90% of the RTX 4050 Laptop's ~190 GB/s VRAM bandwidth. At 1M elements
+  reaches ~170 GB/s, ~89% of the RTX 4050 Laptop's 192 GB/s (spec) VRAM bandwidth. At 1M elements
   the measured "bandwidth" (~500–750 GB/s) exceeds the VRAM limit: the 12 MB working set fits in
   the L2 cache, so repeated runs read from cache, not VRAM. Benchmarks must use data larger than
   L2 to measure real memory bandwidth.
