@@ -21,6 +21,7 @@ Hand-written CUDA kernels, built up level by level and benchmarked.
 │   ├── level1_vector_add.txt
 │   ├── level2_reduction.txt
 │   └── level3_matmul.txt
+├── scripts/                 # run_all.sh: rebuilds and regenerates every result
 └── src/
     ├── level1_vector_add/
     ├── level2_reduction/
@@ -46,6 +47,12 @@ Binaries land in `build/bin/`. Kernels are compiled with `-lineinfo` so Nsight C
 
 \*Theoretical FP32 peak = 2560 cores × 2 FLOP × 3.105 GHz (max SM clock). A 140 W laptop GPU does not
 sustain its max clock under full load, so the achievable peak is lower; a measured-peak benchmark is planned.
+
+## How to reproduce
+
+Every number in this README comes from one command: `./scripts/run_all.sh`
+(laptop plugged in, Windows power mode 'Best performance'). It builds in Release, records the
+environment in results/env.txt, and writes each program's output to results/ and its CSV to results/raw/.
 
 ## Level 1: Vector Add
 
