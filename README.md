@@ -17,10 +17,8 @@ Hand-written CUDA kernels, built up level by level and benchmarked.
 │   ├── cuda_utils.h         # shared helpers (CUDA_CHECK, GpuTimer)
 │   └── bench.h              # benchmark framework: warm-up, median + p10/p90, peaks, CSV
 ├── results/                 # saved benchmark output, one file per level
-│   ├── raw/                 # machine-readable CSV, one file per level
-│   ├── level1_vector_add.txt
-│   ├── level2_reduction.txt
-│   └── level3_matmul.txt
+│   ├── raw/runN/            # CSV + console output of each program, one folder per full run
+│   └── env.txt
 ├── scripts/                 # run_all.sh: rebuilds and regenerates every result
 └── src/
     ├── level1_vector_add/
@@ -52,7 +50,8 @@ sustain its max clock under full load, so the achievable peak is lower; a measur
 
 Every number in this README comes from one command: `./scripts/run_all.sh`
 (laptop plugged in, Windows power mode 'Best performance'). It builds in Release, records the
-environment in results/env.txt, and writes each program's output to results/ and its CSV to results/raw/.
+environment in results/env.txt, and runs the full suite 3 times (`RUNS=3`), writing each program's
+console output and CSV to results/raw/runN/. Reported numbers are the median across the runs.
 
 ## Level 1: Vector Add
 

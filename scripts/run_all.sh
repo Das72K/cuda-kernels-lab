@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 BUILD=build
 RAW=results/raw
 COOLDOWN=10   # seconds of idle between programs, so heat from one doesn't slow the next
+RUNS=${RUNS:-3}   # full repetitions; override with RUNS=1 ./scripts/run_all.sh
 mkdir -p "$RAW"
 
 echo "== Build (Release) =="
@@ -28,19 +29,23 @@ echo "== Environment =="
     nvidia-smi --query-gpu=name,driver_version,clocks.max.sm,clocks.max.mem,power.max_limit,temperature.gpu --format=csv
 } | tee results/env.txt
 
-# name of the binary -> name of its results files
+# name of the binary -> name of its results files, inside this run's folder
 run() {
-    local bin=$1 out=$2
+    local bin=$1 out=$2 dir=$3
     echo
-    echo "== $bin =="
-    "./$BUILD/bin/$bin" --csv "$RAW/$out.csv" | tee "results/$out.txt"
+    echo "== $bin (run $r of $RUNS) =="
+    "./$BUILD/bin/$bin" --csv "$dir/$out.csv" | tee "$dir/$out.txt"
     sleep "$COOLDOWN"
 }
 
-run peak_bench        peaks
-run level1_vector_add level1_vector_add
-run level2_reduction  level2_reduction
-run level3_matmul     level3_matmul
+for r in $(seq 1 "$RUNS"); do
+    dir="$RAW/run$r"
+    mkdir -p "$dir"
+    run peak_bench        peaks             "$dir"
+    run level1_vector_add level1_vector_add "$dir"
+    run level2_reduction  level2_reduction  "$dir"
+    run level3_matmul     level3_matmul     "$dir"
+done
 
 echo
-echo "Done. CSVs in $RAW/, console outputs in results/, environment in results/env.txt"
+echo "Done. $RUNS runs in $RAW/run*/ (CSV + console output per program), environment in results/env.txt"
