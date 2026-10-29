@@ -1,6 +1,7 @@
 // Peak microbenchmarks: achievable DRAM bandwidth (copy, read-only) and FP32 FMA throughput.
 // These are the empirical ceilings for the roofline plot.
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
@@ -86,6 +87,7 @@ __global__ void fmaKernel(float* sink, int iters, float a, float b)
     for (int c = 0; c < CHAINS; c++) {
         x[c] = threadIdx.x * 0.001f + c;
     }
+    #pragma unroll 16
     for (int i = 0; i < iters; i++) {
         #pragma unroll
         for (int c = 0; c < CHAINS; c++) {
@@ -120,7 +122,7 @@ int main(int argc, char** argv)
     float*  d_sink = nullptr;
     CUDA_CHECK(cudaMalloc(&d_in, bytes));
     CUDA_CHECK(cudaMalloc(&d_out, bytes));
-    CUDA_CHECK(cudaMalloc(&d_sink, size_t(blocks) * threads * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_sink, size_t(std::max(blocks, dev.sm_count * 64)) * threads * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_in, 0, bytes));
 
     // ---------- measurements ----------
@@ -130,11 +132,20 @@ int main(int argc, char** argv)
     const bench::Stats readU = bench::timeGpu([&] { readKernelUnrolled<<<blocks, threads>>>(d_in, d_sink, n4); });
 
     constexpr int CHAINS = 8;
-    const int     iters  = 4096;
-    const double  fmaFlops = double(blocks) * threads * iters * CHAINS * 2.0;   // one FMA = 2 FLOP
+    const int     iters  = 8192;
+
+    // Launch an exact number of FULL waves: ask CUDA how many blocks of this kernel fit on one SM,
+    // so no SM sits idle in a partly-filled last wave (the "tail effect").
+    int blocksPerSm = 0;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSm, fmaKernel<CHAINS>, threads, 0));
+    const int fmaBlocks = dev.sm_count * blocksPerSm * 8;   // 8 full waves
+
+    const double fmaFlops = double(fmaBlocks) * threads * iters * CHAINS * 2.0;   // one FMA = 2 FLOP
     const bench::Stats fma = bench::timeGpu([&] {
-        fmaKernel<CHAINS><<<blocks, threads>>>(d_sink, iters, 0.999999f, 1e-6f);
+        fmaKernel<CHAINS><<<fmaBlocks, threads>>>(d_sink, iters, 0.999999f, 1e-6f);
     });
+    std::printf("FMA launch: %d blocks per SM x %d SMs x 8 waves = %d blocks\n",
+                blocksPerSm, dev.sm_count, fmaBlocks);
 
     // ---------- results ----------
     const double copyBytes = 2.0 * bytes;   // read + write
@@ -179,7 +190,7 @@ int main(int argc, char** argv)
     row("read-only",           read, (long long)(n4 * 4), readBytes, 0.0);
     row("copy unrolled x4",      copyU, (long long)(n4 * 4), copyBytes, 0.0);
     row("read-only unrolled x4", readU, (long long)(n4 * 4), readBytes, 0.0);
-    row("FMA (FP32)",          fma,  (long long)blocks * threads, 0.0, fmaFlops);
+    row("FMA (FP32)",          fma,  (long long)fmaBlocks * threads, 0.0, fmaFlops);
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_out));
