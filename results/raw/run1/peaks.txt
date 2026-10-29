@@ -1,0 +1,14 @@
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU (sm_89), 20 SMs, L2 24 MB
+Theoretical peaks: DRAM 192.0 GB/s (96-bit, 8.001 GHz x 2), FP32 10521.6 GFLOPS at driver-reported clock (20 SMs x 128 lanes x 2 x 2.055 GHz)
+FMA launch: 6 blocks per SM x 20 SMs x 8 waves = 960 blocks
+
+Times: median of 15 trials (p10/p90 spread)
+
+test                          ms       p10       p90       result  % theoretical
+copy (read + write)        6.153     6.141     6.171   174.5 GB/s          90.9%
+read-only                  2.861     2.859     2.865   187.7 GB/s          97.7%
+copy unrolled x4           6.171     6.156     6.184   174.0 GB/s          90.6%
+read-only unrolled x4      2.861     2.860     2.872   187.6 GB/s          97.7%
+FMA (FP32)                 2.449     2.448     2.498  13155 GFLOPS        125.0%
+
+Implied sustained SM clock during the FMA test: 2.569 GHz (driver-reported: 2.055 GHz)

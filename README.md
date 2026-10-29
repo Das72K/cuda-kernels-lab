@@ -16,7 +16,7 @@ Hand-written CUDA kernels, built up level by level and benchmarked.
 ├── common/
 │   ├── cuda_utils.h         # shared helpers (CUDA_CHECK, GpuTimer)
 │   └── bench.h              # benchmark framework: warm-up, median + p10/p90, peaks, CSV
-├── results/                 # saved benchmark output, one file per level
+├── results/                 # env.txt + raw/runN/ (one folder per full benchmark run)
 │   ├── raw/runN/            # CSV + console output of each program, one folder per full run
 │   └── env.txt
 ├── scripts/                 # run_all.sh: rebuilds and regenerates every result

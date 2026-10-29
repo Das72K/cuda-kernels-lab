@@ -1,0 +1,15 @@
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU (sm_89), 20 SMs, L2 24 MB
+Theoretical peaks: DRAM 192.0 GB/s (96-bit, 8.001 GHz x 2), FP32 10521.6 GFLOPS at driver-reported clock (20 SMs x 128 lanes x 2 x 2.055 GHz)
+
+n = 33554432 (134.2 MB), block = 256 threads, CPU sum = 151006621
+Times: median of 15 trials (p10/p90 spread), after a time-based GPU warm-up
+
+version                       ms       p10       p90     GB/s   %peak   vs CPU          sum  check
+CPU (1 core)             11.8436   10.4630   13.6315     11.3       -      1.0    151006621   PASS
+CUB DeviceReduce::Sum     0.7532    0.7201    0.7826    178.2   92.8%     15.7    151006621   PASS
+v0 atomicAdd              0.7644    0.7498    0.7936    175.6   91.4%     15.5    151006621   PASS
+v1 tree interleaved       1.8045    1.7964    1.8196     74.4   38.7%      6.6    151006621   PASS
+v2 tree strided           1.2572    1.2562    1.2691    106.8   55.6%      9.4    151006621   PASS
+v3 tree sequential        1.2159    1.2146    1.2210    110.4   57.5%      9.7    151006621   PASS
+v4 first add on load      0.7313    0.7269    0.7648    183.5   95.6%     16.2    151006621   PASS
+v5 warp shuffle           0.7299    0.7261    0.7324    183.9   95.8%     16.2    151006621   PASS

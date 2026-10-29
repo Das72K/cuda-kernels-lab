@@ -1,0 +1,13 @@
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU (sm_89), 20 SMs, L2 24 MB
+Theoretical peaks: DRAM 192.0 GB/s (96-bit, 8.001 GHz x 2), FP32 10521.6 GFLOPS at driver-reported clock (20 SMs x 128 lanes x 2 x 2.055 GHz)
+
+Times: median of 15 trials; GB/s = 3 arrays moved by the kernel; x = speed-up vs CPU (1 core)
+
+           n  MB/array     CPU ms    kern ms kern GB/s    kern x   total ms   total x  pinned ms  pinned x  check
+        1000       0.0     0.0001     0.0089       1.4       0.0     0.1211      0.00     0.1361      0.00   PASS
+       10000       0.0     0.0013     0.0078      15.4       0.2     0.1253      0.01     0.1360      0.01   PASS
+      100000       0.4     0.0153     0.0086     139.4       1.8     0.2900      0.05     0.3216      0.05   PASS
+     1000000       4.0     0.5973     0.0113    1058.3      52.7     1.9622      0.30     1.2879      0.46   PASS
+    10000000      40.0     7.3779     0.6668     180.0      11.1    17.4616      0.42    10.6406      0.69   PASS
+    50000000     200.0    36.2528     3.5205     170.4      10.3   113.6685      0.32    51.4801      0.70   PASS
+   100000000     400.0    69.5191     6.6432     180.6      10.5   184.0707      0.38   101.3693      0.69   PASS
