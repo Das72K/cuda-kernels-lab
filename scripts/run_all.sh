@@ -15,10 +15,11 @@ cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release > /dev/null
 cmake --build "$BUILD" -j
 
 echo "== Environment =="
+# checked before the block below: tee empties the tracked env.txt, which would make the tree look dirty
+dirty=""
+git diff --quiet || dirty="-dirty"
 {
     echo "date: $(date -Iseconds)"
-    dirty=""
-    git diff --quiet || dirty="-dirty"
     echo "git_commit: $(git rev-parse --short HEAD)${dirty}"
     echo "nvcc: $(nvcc --version | tail -n 1)"
     echo "cmake: $(cmake --version | head -n 1)"

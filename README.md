@@ -43,6 +43,13 @@ Binaries land in `build/bin/`. Kernels are compiled with `-lineinfo` so Nsight C
 ## Results
 
 <!-- BEGIN:summary -->
+| Level | Workload | Bound by | Best own kernel | vs library | vs measured ceiling |
+|---|---|---|---|---|---|
+| 1 Vector add | 100M floats | memory | 180 GB/s | — | 96% of 188 GB/s |
+| 2 Reduction | 33.6M ints | memory | v5: 185 GB/s | 99% of CUB | 98% of 188 GB/s |
+| 3 SGEMM | n = 2048, FP32 | compute | v4: 5.81 TFLOPS | 71% of cuBLAS | 44% of 13.2 TFLOPS |
+
+Ceilings measured on this GPU by `bench/peak.cu`: DRAM 187.6 GB/s (best read test), FP32 13.16 TFLOPS (FMA test). All values: median across 3 full runs.
 <!-- END:summary -->
 
 ![Measured roofline](results/plots/roofline.png)
@@ -50,6 +57,13 @@ Binaries land in `build/bin/`. Kernels are compiled with `-lineinfo` so Nsight C
 ### Measured ceilings
 
 <!-- BEGIN:peaks -->
+| test | ms (median) | range across runs | result | % of 192 GB/s spec |
+|---|---|---|---|---|
+| copy (read + write) | 6.126 | 6.125–6.129 | 175.3 GB/s | 91.3% |
+| read-only | 2.862 | 2.861–2.872 | 187.6 GB/s | 97.7% |
+| copy unrolled x4 | 6.167 | 6.149–6.170 | 174.1 GB/s | 90.7% |
+| read-only unrolled x4 | 2.862 | 2.861–2.862 | 187.6 GB/s | 97.7% |
+| FMA (FP32) | 2.448 | 2.437–2.449 | 13.16 TFLOPS | — |
 <!-- END:peaks -->
 
 ## How to reproduce
@@ -61,6 +75,29 @@ console output and CSV to results/raw/runN/. Reported numbers are the median acr
 Then `.venv/bin/python scripts/make_plots.py` regenerates all tables and plots from those CSVs
 (one-time setup: `python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt`).
 
+## Method and measurement pitfalls
+
+Each GPU measurement: a 500 ms time-based warm-up, then 15 timed trials, each auto-calibrated to last at
+least 10 ms; each run reports the median and p10/p90. The full suite runs 3 times; README numbers are the
+median across runs. All GPU work in a program is measured before any CPU timing. Correctness is checked on
+every run against a CPU reference (exact for integers) or cuBLAS (max abs error < 1e-2 for FP32).
+Ceilings are measured, not quoted: `bench/peak.cu` gives 188 GB/s (DRAM read) and 13.2 TFLOPS (FP32 FMA).
+
+Pitfalls found and fixed along the way:
+
+| Pitfall | Symptom | Fix |
+|---|---|---|
+| L2 cache | 12 MB working set showed ~1,070 GB/s, far above the DRAM spec | data much larger than the 24 MB L2 |
+| Compiler deleting work | CPU looked ~100× faster | `doNotOptimize` / `asm volatile` barrier |
+| Cold GPU | first cuBLAS measurement 2.70 ms instead of 2.09 ms | 500 ms warm-up inside every measurement |
+| Shared CPU/GPU power budget | GPU kernels 5–15% slower right after seconds of CPU load | all GPU timing before any CPU timing |
+| Wave tail effect | FMA test reached 11.3 TFLOPS instead of 13.1 | launch whole waves (occupancy API) |
+| Run-to-run drift | absolute numbers ~5% lower in a late run | 3 full runs; ratios to a same-run reference stay within ±0.1 points |
+
+Limitations: one laptop GPU (RTX 4050 Laptop, 140 W); CPU timings vary by ~10–20% between trials (OS
+scheduling, shared power budget); integer reduction only; square matrices only; the SGEMM points on the
+roofline use the minimum-traffic estimate of arithmetic intensity (to be replaced by measured DRAM traffic).
+
 ## Level 1: Vector Add
 
 The kernel computes `c[i] = a[i] + b[i]`, with one thread per element.
@@ -69,35 +106,33 @@ The kernel computes `c[i] = a[i] + b[i]`, with one thread per element.
 laptop plugged in. CPU baseline = single-threaded loop.
 
 <!-- BEGIN:level1 -->
+| n | CPU ms | kernel ms | kernel GB/s | kernel vs CPU | total ms (pageable) | vs CPU | total ms (pinned) | vs CPU | check |
+|---|---|---|---|---|---|---|---|---|---|
+| 1,000 | 0.0001 | 0.0094 | 1.3 | 0.0× | 0.100 | 0.00× | 0.139 | 0.00× | PASS |
+| 10,000 | 0.0013 | 0.0084 | 14.4 | 0.2× | 0.110 | 0.01× | 0.162 | 0.01× | PASS |
+| 100,000 | 0.0173 | 0.0084 | 143.3 | 2.1× | 0.288 | 0.06× | 0.275 | 0.06× | PASS |
+| 1,000,000 | 0.5512 | 0.0112 | 1068.0 | 49.1× | 1.699 | 0.32× | 1.259 | 0.44× | PASS |
+| 10,000,000 | 6.9007 | 0.6652 | 180.4 | 10.4× | 17.613 | 0.39× | 10.534 | 0.66× | PASS |
+| 50,000,000 | 34.0384 | 3.5174 | 170.6 | 9.7× | 86.678 | 0.39× | 50.976 | 0.67× | PASS |
+| 100,000,000 | 67.2103 | 6.6657 | 180.0 | 10.1× | 176.745 | 0.38× | 104.882 | 0.64× | PASS |
 <!-- END:level1 -->
 
 ![Level 1 transfers](results/plots/level1_transfers.png)
 
+*Median across 3 full runs; error bars: min–max across runs.*
+
 ### Findings
 
-- **Kernel bandwidth and the L2 cache effect:** For large arrays (10M–50M elements) the kernel
-  reaches ~170 GB/s, ~89% of the RTX 4050 Laptop's 192 GB/s (spec) VRAM bandwidth. At 1M elements
-  the measured "bandwidth" (~500–750 GB/s) exceeds the VRAM limit: the 12 MB working set fits in
-  the L2 cache, so repeated runs read from cache, not VRAM. Benchmarks must use data larger than
-  L2 to measure real memory bandwidth.
-
-- **Kernel vs CPU speed-up:** Vector add is memory-bound (12 bytes moved per addition), so the
-  speed-up is set by the ratio of memory bandwidths: ~170 GB/s on the GPU vs ~14 GB/s for one CPU
-  core gives the measured 10–14×. Below ~100K elements the fixed launch overhead (~10–20 µs, varies between runs) dominates and the
-  CPU is faster.
-
-- **Transfers dominate (pageable vs pinned):** Including host↔device copies, the GPU never beats
-  the CPU. Pageable copies run at ~4.5–5 GB/s because the driver stages them through a page-locked
-  buffer; pinned memory (`cudaMallocHost`) lets the copy engine read directly and raises copy throughput
-  ~2.5× to ~11–12 GB/s (2.4× faster total at 10M–50M). Even then the best result is 0.91× the CPU: copying
-  over PCIe costs more than the single addition it enables. GPUs pay off when data stays on the
-  device or the work per byte is high (the goal of Level 3, matrix multiplication).
-
-- **Laptop noise and throttling:** Short runs (<100 µs) vary between runs due to GPU clock changes.
-  At 100M the kernel dropped to ~134 GB/s, consistent with the laptop GPU lowering clocks under
-  sustained load. A CPU-side gotcha: in Release builds the compiler removed repeated identical CPU
-  runs, making the CPU look ~100× faster; an `asm volatile("" ::: "memory")` barrier forces every
-  repeat to execute.
+- **The kernel runs at the memory ceiling:** for large arrays (10M–100M) it reaches ~170–180 GB/s, about
+  91–96% of the measured 188 GB/s ceiling. At 1M elements it shows ~1,070 GB/s: the 12 MB working set fits
+  in the 24 MB L2 cache, so repeated runs read from cache, not DRAM.
+- **Speed-up follows the bandwidth ratio:** vector add is memory-bound (12 bytes per addition), so the
+  kernel's ~10× advantage over one CPU core matches the ratio of the two memory systems' bandwidths.
+  Below ~100K elements the fixed ~8–9 µs launch overhead dominates and the CPU is faster.
+- **Transfers dominate end to end:** including PCIe copies, the GPU never beats the CPU (best: ~0.67×).
+  Pinned host memory (`cudaMallocHost`) lets the copy engine read directly and raises copy throughput from
+  ~7 to ~12 GB/s (~1.7×), but copying 12 bytes per addition still costs more than the addition saves.
+  GPUs pay off when data stays on the device or the work per byte is high (Level 3).
 
 ### How to run
 
@@ -110,34 +145,38 @@ cmake -S . -B build && cmake --build build && ./build/bin/level1_vector_add
 The kernels sum n = 2^25 random ints (0–9, fixed seed, 134 MB, larger than L2) on the GPU; ints keep
 the result exact, so GPU and CPU must match bit-for-bit.
 
-**Test setup:** same hardware as Level 1; times are the median of 7 trials; peak DRAM bandwidth
-(spec) 192 GB/s.
+**Test setup:** same hardware as Level 1; times are the median of 15 trials per run, median across 3 runs;
+peak DRAM bandwidth: measured ceilings (see Measured ceilings).
 
 <!-- BEGIN:level2 -->
+| version | ms (median) | range across runs | GB/s | % of measured ceiling | % of CUB | check |
+|---|---|---|---|---|---|---|
+| CPU (1 core) | 10.6980 | 10.6271–12.6679 | 12.5 | — | — | PASS |
+| v0 atomicAdd | 0.7227 | 0.7212–0.7229 | 185.7 | 99.0% | 99.9% | PASS |
+| v1 tree interleaved | 1.7985 | 1.7932–1.8026 | 74.6 | 39.8% | 40.1% | PASS |
+| v2 tree strided | 1.2577 | 1.2548–1.2621 | 106.7 | 56.9% | 57.4% | PASS |
+| v3 tree sequential | 1.2186 | 1.2134–1.2197 | 110.1 | 58.7% | 59.2% | PASS |
+| v4 first add on load | 0.7275 | 0.7274–0.7306 | 184.5 | 98.3% | 99.2% | PASS |
+| v5 warp shuffle | 0.7271 | 0.7268–0.7298 | 184.6 | 98.4% | 99.3% | PASS |
+| CUB DeviceReduce::Sum | 0.7220 | 0.7218–0.7237 | 185.9 | 99.1% | 100.0% | PASS |
 <!-- END:level2 -->
 
 ![Level 2 ladder](results/plots/level2_ladder.png)
 
+*Median across 3 full runs; error bars: min–max across runs.*
+
 ### Findings
 
-- **Atomics are not automatically slow:** v0 (`atomicAdd` on one counter) runs at 186.5 GB/s.
-  The SASS shows why: the compiler warp-aggregates the atomics (`REDUX.SUM` + one `RED.E.ADD`
-  per warp), so ~1M atomics reach the L2 instead of 33.5M.
-- **Warp divergence (v1 → v2, 1.71×):** v1 picks working threads with `tid % (2*s) == 0`,
-  leaving half of every warp idle; v2 packs the work onto contiguous threads so whole warps
-  are either busy or skipped, and drops the slow modulo.
-- **Bank conflicts (v2 → v3, 1.04×):** v2's strided shared-memory access causes 2-way and
-  higher bank conflicts; v3's "fold in half" addressing removes them. On this GPU the gain is
-  small, because the worst conflicts occur in late rounds when few threads are active.
-- **More work per thread (v3 → v4, 1.65×):** loading and adding two elements per thread
-  removes the idle first round and halves the number of blocks; v4 reaches 183.8 GB/s.
-- **The memory roofline:** v0, v4, v5 and NVIDIA's CUB all land at 184–187 GB/s, about 97%
-  of the 192 GB/s spec. Reduction is memory-bound, so once a version hits this ceiling,
-  compute optimizations stop showing up: the warp-shuffle v5 is no faster than v4, and a
-  further grid-stride version was not added because there is nothing left to gain here.
-- **Measuring honestly:** with a single timed batch, v1–v3 varied by up to ~30% between runs,
-  while the memory-bound versions did not. These kernels depend on the boosting SM clock;
-  reporting the median of 7 trials made the results stable.
+- **Every fast version reaches the ceiling:** v0, v4, v5 and NVIDIA CUB all run at ~185 GB/s, about 99% of
+  the measured 188 GB/s DRAM ceiling. Reduction is memory-bound; once a version saturates DRAM, further
+  compute optimizations cannot show up (v5's warp shuffle gives 1.00× over v4).
+- **Atomics are not automatically slow:** v0 (`atomicAdd` on one counter) matches CUB. The SASS shows why:
+  the compiler warp-aggregates the atomics (`REDUX.SUM` + one `RED.E.ADD` per warp), so ~1M atomics reach
+  the L2 instead of 33.5M.
+- **The tree ladder:** removing warp divergence (v1 → v2) gives 1.43×; removing shared-memory bank conflicts
+  (v2 → v3) only 1.03×, because the worst conflicts occur in late rounds with few active threads; loading and
+  adding two elements per thread (v3 → v4) gives 1.7× and reaches the ceiling. The biggest win came from
+  more work per thread, not from polishing the compute.
 
 ### How to run
 
@@ -150,43 +189,55 @@ the result exact, so GPU and CPU must match bit-for-bit.
 The kernels compute C = A·B for square FP32 matrices, n = 2048 (17.18 GFLOP), with random values in
 [-1, 1] (fixed seed); correctness is checked against cuBLAS with max abs error < 1e-2.
 
-**Test setup:** same hardware as Level 1; GPU times are the median of 7 trials after a 500 ms GPU
-warm-up; CPU is a single run (single-threaded i-k-j loop).
+**Test setup:** same hardware as Level 1; GPU times are the median of 15 trials per run, median across 3 runs,
+after a 500 ms GPU warm-up; CPU is a single run (single-threaded i-k-j loop).
 
 <!-- BEGIN:level3 -->
+| version | ms (median) | range across runs | GFLOPS | % of FP32 ceiling | % of cuBLAS | max err | check |
+|---|---|---|---|---|---|---|---|
+| CPU (1 core, ikj) | 2561.923 | 2218.346–2574.875 | 7 | — | — | 3.8e-05 | PASS |
+| v0 naive (uncoalesced) | 85.556 | 85.548–85.570 | 201 | 1.5% | 2.4% | 0.0e+00 | PASS |
+| v1 naive (coalesced) | 20.180 | 20.171–20.194 | 851 | 6.5% | 10.3% | 0.0e+00 | PASS |
+| v2 tiled (shared mem) | 15.497 | 15.485–15.530 | 1109 | 8.4% | 13.5% | 0.0e+00 | PASS |
+| v3 register tiling 4x4 | 3.103 | 3.098–3.105 | 5536 | 42.1% | 67.2% | 0.0e+00 | PASS |
+| v4 float4 + transposed A | 2.955 | 2.944–2.957 | 5814 | 44.2% | 70.6% | 0.0e+00 | PASS |
+| cuBLAS sgemm (reference) | 2.087 | 2.078–2.090 | 8232 | 62.6% | 100.0% | 0.0e+00 | PASS |
+| cuBLAS TF32 Tensor Cores | 1.346 | 1.342–1.347 | 12767 | — | 155.1% | 2.0e-02 | PASS |
 <!-- END:level3 -->
 
 Size sweep: GFLOPS (% of cuBLAS)
 
 <!-- BEGIN:level3_sweep -->
+| n | cuBLAS GFLOPS | v3 GFLOPS (% cuBLAS) | v4 GFLOPS (% cuBLAS) | check |
+|---|---|---|---|---|
+| 512 | 5475 | 3925 (71.7%) | 4327 (79.0%) | PASS |
+| 1024 | 7475 | 5312 (71.1%) | 5670 (75.7%) | PASS |
+| 2048 | 8229 | 5521 (67.1%) | 5810 (70.6%) | PASS |
+| 4096 | 8387 | 5360 (64.0%) | 5462 (65.1%) | PASS |
 <!-- END:level3_sweep -->
 
 ![Level 3 ladder](results/plots/level3_ladder.png)
 
+*Median across 3 full runs; error bars: min–max across runs.*
+
 ![Level 3 sweep](results/plots/level3_sweep.png)
+
+*Median across 3 full runs; error bars: min–max across runs.*
 
 ### Findings
 
-- **Coalescing (v0 → v1, 4.2×):** the only change is which thread index maps to rows and which to
-  columns. With `threadIdx.x` on columns, a warp reads consecutive addresses of B and C; with it on
-  rows, every thread touches a different 8 KB-apart row.
-- **Shared-memory tiling (v1 → v2, only 1.3×):** tiling cuts global-memory traffic 16×, but the inner
-  loop then needs two shared-memory loads per FMA. Shared memory serves roughly one warp-load per cycle
-  while the SM can issue four warp-FMAs, so the bottleneck moved from DRAM to shared memory.
-- **Register tiling (v2 → v3, 5.0×):** each thread computes a 4×4 block of C as an outer product of
-  4 A values and 4 B values held in registers: 8 shared loads per 16 FMAs instead of 2 per 1.
-  v3 reaches 5.55 TFLOPS, 67.5% of cuBLAS.
-- **Vectorized shared loads (v3 → v4, 1.05×):** storing the A tile transposed (padded by 4 floats to
-  avoid bank conflicts) allows two `float4` loads per k-step instead of eight scalar loads.
-  v4 reaches 5.82 TFLOPS, 70.8% of cuBLAS.
-- **The gap to cuBLAS grows with size:** v4 is at 82% of cuBLAS at n = 512 but 65% at n = 4096.
-  cuBLAS keeps scaling while v4 peaks at n = 2048; larger per-thread tiles and double buffering
-  (not implemented) are the likely difference, to be confirmed with Nsight Compute.
-- **Tensor Cores:** cuBLAS in TF32 mode reaches 12.7 TFLOPS (1.54× FP32 cuBLAS) at the cost of
-  precision (max error 2.0e-2 vs 0 for FP32).
-- **A measurement pitfall:** without a warm-up, the first cuBLAS run (after the multi-second CPU
-  baseline left the GPU idle and down-clocked) measured 2.70 ms instead of 2.09 ms, making every
-  kernel look ~20 percentage points closer to cuBLAS than it is. A 500 ms warm-up fixed it.
+- **The optimization ladder:** coalescing (v0 → v1) 4.2×; shared-memory tiling (v1 → v2) only 1.30×, because
+  the inner loop then needs two shared-memory loads per FMA and the bottleneck moves to shared memory;
+  2D register tiling with a 4×4 outer product per thread (v2 → v3) 5.0×; vectorized `float4` shared loads
+  with a transposed, padded A tile (v3 → v4) 1.05×, consistent in all 3 runs.
+- **Where v4 stands:** ~5.8 TFLOPS, ~71% of cuBLAS FP32 and ~44% of the measured 13.2 TFLOPS FP32 ceiling
+  (cuBLAS itself reaches ~63%). The gap to cuBLAS grows with size, from ~79% at n = 512 to ~65% at
+  n = 4096; larger per-thread tiles and double buffering are the likely difference (to be confirmed with
+  Nsight Compute).
+- **Tensor Cores:** cuBLAS in TF32 mode reaches ~12.8 TFLOPS (~1.55× FP32 cuBLAS) at the cost of precision
+  (max error 2e-2 vs 0 for FP32).
+- **Exact match with cuBLAS:** v0–v4 match cuBLAS bit for bit (max error 0) because they accumulate each
+  output in the same k order with fused multiply-adds; the CPU loop does not fuse and differs by ~4e-5.
 
 ### How to run
 

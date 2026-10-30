@@ -5,10 +5,10 @@ FMA launch: 6 blocks per SM x 20 SMs x 8 waves = 960 blocks
 Times: median of 15 trials (p10/p90 spread)
 
 test                          ms       p10       p90       result  % theoretical
-copy (read + write)        6.143     6.136     6.164   174.8 GB/s          91.0%
-read-only                  2.861     2.860     2.868   187.7 GB/s          97.7%
-copy unrolled x4           6.167     6.159     6.204   174.1 GB/s          90.7%
-read-only unrolled x4      2.870     2.860     2.872   187.1 GB/s          97.4%
-FMA (FP32)                 2.463     2.460     2.495  13078 GFLOPS        124.3%
+copy (read + write)        6.125     6.117     6.142   175.3 GB/s          91.3%
+read-only                  2.872     2.860     2.901   187.0 GB/s          97.4%
+copy unrolled x4           6.167     6.157     6.217   174.1 GB/s          90.7%
+read-only unrolled x4      2.862     2.859     2.883   187.6 GB/s          97.7%
+FMA (FP32)                 2.449     2.446     2.454  13153 GFLOPS        125.0%
 
-Implied sustained SM clock during the FMA test: 2.554 GHz (driver-reported: 2.055 GHz)
+Implied sustained SM clock during the FMA test: 2.569 GHz (driver-reported: 2.055 GHz)

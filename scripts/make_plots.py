@@ -84,6 +84,19 @@ def short(kernel: str) -> str:
     return kernel.split()[0]
 
 
+def ordered(sel):
+    """CPU first, then v0, v1, ... in version order, then libraries (FP32 before TF32)."""
+    def rank(kernel):
+        if kernel.startswith("CPU"):
+            return (0, 0, kernel)
+        m = re.match(r"v(\d+)", kernel)
+        if m:
+            return (1, int(m.group(1)), kernel)
+        return (2, int("TF32" in kernel), kernel)
+    idx = sorted(range(len(sel)), key=lambda i: rank(sel.iloc[i]["kernel"]))
+    return sel.iloc[idx]
+
+
 # ================================================================== formatting
 def md_table(headers, rows) -> str:
     lines = ["| " + " | ".join(headers) + " |",
@@ -150,7 +163,7 @@ def table_level1(agg):
 
 def table_level2(agg, bw):
     rows = []
-    for _, r in pick(agg, "2_reduction").iterrows():
+    for _, r in ordered(pick(agg, "2_reduction")).iterrows():
         gpu = r["kernel"] != "CPU (1 core)"
         rows.append([r["kernel"], f"{r['ms']:.4f}", rng(r["ms_lo"], r["ms_hi"], 4), f"{r['gbps']:.1f}",
                      f"{100 * r['gbps'] / bw:.1f}%" if gpu else "—",
@@ -161,7 +174,7 @@ def table_level2(agg, bw):
 
 def table_level3(agg, peak):
     rows = []
-    for _, r in pick(agg, "3_matmul").iterrows():
+    for _, r in ordered(pick(agg, "3_matmul")).iterrows():
         cpu  = r["kernel"].startswith("CPU")
         tf32 = "TF32" in r["kernel"]
         rows.append([r["kernel"], f"{r['ms']:.3f}", rng(r["ms_lo"], r["ms_hi"], 3), f"{r['gflops']:.0f}",
@@ -191,24 +204,31 @@ def plot_roofline(agg, bw, peak, path):
     ridge = peak / bw
     ax.axvline(ridge, color="grey", ls=":", lw=1)
     ax.text(ridge * 1.08, peak * 0.035, f"ridge point\n{ridge:.0f} FLOP/byte", fontsize=8, color="grey")
-    ax.text(0.012, peak * 1.12, f"FP32 ceiling {peak / 1e3:.1f} TFLOPS (FMA test)", fontsize=8)
-    ax.text(0.012, 0.012 * bw * 1.6, f"DRAM ceiling {bw:.0f} GB/s", fontsize=8, rotation=31)
+    ax.text(ridge * 1.5, peak * 1.15, f"FP32 ceiling {peak / 1e3:.1f} TFLOPS (FMA test)", fontsize=8)
+    ax.text(1.5, 1.5 * bw * 0.35, f"DRAM ceiling {bw:.0f} GB/s", fontsize=8, rotation=31)
 
     # Level 1: 1 FLOP per 12 bytes
     n1 = pick(agg, "1_vector_add")["n"].max()
     k = one(agg, "1_vector_add", "GPU kernel", n1)
     ax.scatter(1 / 12, n1 / (k["ms"] / 1e3) / 1e9, color="tab:blue", s=40, zorder=3, label="L1 vector add")
 
-    # Level 2: 1 integer add per 4 bytes (operations counted like FLOPs)
-    first = True
-    for _, r in pick(agg, "2_reduction").iterrows():
+    # Level 2: 1 integer add per 4 bytes (operations counted like FLOPs);
+    # versions within 10% of each other share one label
+    pts = []
+    for _, r in ordered(pick(agg, "2_reduction")).iterrows():
         if r["kernel"].startswith("CPU"):
             continue
-        y = r["n"] / (r["ms"] / 1e3) / 1e9
-        ax.scatter(0.25, y, color="tab:orange", s=30, zorder=3, label="L2 reduction" if first else None)
-        first = False
-        if r["kernel"].startswith(("v1", "v3", "CUB")):
-            ax.annotate(short(r["kernel"]), (0.25, y), xytext=(-18, -3), textcoords="offset points", fontsize=7)
+        pts.append((r["n"] / (r["ms"] / 1e3) / 1e9, short(r["kernel"])))
+    ax.scatter([0.25] * len(pts), [y for y, _ in pts], color="tab:orange", s=30, zorder=3, label="L2 reduction")
+    groups = []
+    for y, name in sorted(pts):
+        if groups and y <= groups[-1][0] * 1.10:
+            groups[-1][1].append(name)
+        else:
+            groups.append([y, [name]])
+    for y, names in groups:
+        ax.annotate(", ".join(names), (0.25, y), xytext=(-12, -3), textcoords="offset points",
+                    fontsize=7, ha="right")
 
     # Level 3: minimum-traffic (algorithmic) intensity 2n^3 / (3 * 4n^2) = n/6
     ai3 = 2048 / 6
@@ -218,8 +238,9 @@ def plot_roofline(agg, bw, peak, path):
             continue
         ax.scatter(ai3, r["gflops"], color="tab:green", s=30, zorder=3, label="L3 SGEMM (FP32)" if first else None)
         first = False
-        ax.annotate(short(r["kernel"]), (ai3, r["gflops"]), xytext=(6 if i % 2 else -24, -3),
-                    textcoords="offset points", fontsize=7)
+        left = (i % 2 == 0)
+        ax.annotate(short(r["kernel"]), (ai3, r["gflops"]), xytext=(-8 if left else 8, -3),
+                    textcoords="offset points", fontsize=7, ha="right" if left else "left")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -233,15 +254,39 @@ def plot_roofline(agg, bw, peak, path):
     plt.close(fig)
 
 
-def bar_chart(rows, value, lo, hi, ylabel, title, lines, path):
+def bar_chart(rows, value, lo, hi, ylabel, title, lines, path, gains=True, no_gain_from=()):
     fig, ax = plt.subplots(figsize=(8.5, 4.5))
     x = np.arange(len(rows))
+    kernels = rows["kernel"].tolist()
     vals = rows[value].to_numpy()
-    err = np.vstack([vals - rows[lo].to_numpy(), rows[hi].to_numpy() - vals])
-    ax.bar(x, vals, yerr=err, capsize=3, color="tab:blue")
-    for y, label in lines:
-        ax.axhline(y, ls="--", color="black", lw=1)
-        ax.text(len(x) - 0.45, y, label, ha="right", va="bottom", fontsize=8)
+    tops = rows[hi].to_numpy()
+    err = np.vstack([vals - rows[lo].to_numpy(), tops - vals])
+    own = [k.startswith("v") for k in kernels]          # own kernels in blue, libraries in grey
+    bars = ax.bar(x, vals, yerr=err, capsize=3, color=["tab:blue" if o else "lightgrey" for o in own],
+                  edgecolor="black", lw=0.5)
+    for bar, k in zip(bars, kernels):
+        if "TF32" in k:
+            bar.set_hatch("//")
+    ymax = max(tops.max(), *(y for y, _, _ in lines)) * 1.12
+    ax.set_ylim(0, ymax)
+
+    # value above each bar; own kernels after the first also show the gain vs the previous own kernel
+    # (kernels starting with a prefix in no_gain_from are never used as the baseline)
+    digits = 0 if vals.max() > 1000 else 1
+    prev = None
+    for xi, k, v, top, o in zip(x, kernels, vals, tops, own):
+        text = f"{v:.{digits}f}"
+        if o:
+            if gains and prev is not None:
+                g = v / prev
+                text += f"\n{g:.2f}×" if g < 1.5 else f"\n{g:.1f}×"
+            prev = None if k.startswith(no_gain_from) else v
+        ax.text(xi, top + 0.01 * ymax, text, fontsize=7, ha="center", va="bottom",
+                bbox=dict(facecolor="white", edgecolor="none", pad=0.6))
+
+    for y, label, style in lines:
+        ax.axhline(y, ls=style[0], color=style[1], lw=1, label=label)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8, frameon=False)
     ax.set_xticks(x, rows["kernel"], rotation=25, ha="right", fontsize=8)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -322,15 +367,16 @@ def main():
         (TABLES / f"{name}.md").write_text(content)
 
     plot_roofline(agg, bw, peak, PLOTS / "roofline.png")
-    l2 = pick(agg, "2_reduction").query("not kernel.str.startswith('CPU')", engine="python")
+    l2 = ordered(pick(agg, "2_reduction").query("not kernel.str.startswith('CPU')", engine="python"))
     bar_chart(l2, "gbps", "gbps_lo", "gbps_hi", "GB/s (median, range across runs)",
               "Level 2: reduction versions vs the measured DRAM ceiling",
-              [(bw, f"measured ceiling {bw:.0f} GB/s")], PLOTS / "level2_ladder.png")
-    l3 = pick(agg, "3_matmul").query("not kernel.str.startswith('CPU')", engine="python")
+              [(bw, f"measured ceiling {bw:.0f} GB/s", ("--", "black"))], PLOTS / "level2_ladder.png", no_gain_from=("v0",))
+    l3 = ordered(pick(agg, "3_matmul").query("not kernel.str.startswith('CPU')", engine="python"))
     cublas = one(agg, "3_matmul", "cuBLAS sgemm (reference)")["gflops"]
     bar_chart(l3, "gflops", "gflops_lo", "gflops_hi", "GFLOPS (median, range across runs)",
               "Level 3: SGEMM optimization ladder (n = 2048)",
-              [(peak, f"FP32 ceiling {peak / 1e3:.1f} TFLOPS"), (cublas, "cuBLAS FP32")],
+              [(peak, f"FP32 ceiling {peak / 1e3:.1f} TFLOPS", ("--", "black")),
+               (cublas, "cuBLAS FP32", (":", "dimgrey"))],
               PLOTS / "level3_ladder.png")
     plot_transfers(agg, PLOTS / "level1_transfers.png")
     plot_sweep(agg, peak, PLOTS / "level3_sweep.png")
