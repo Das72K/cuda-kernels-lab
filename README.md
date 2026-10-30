@@ -119,7 +119,7 @@ laptop plugged in. CPU baseline = single-threaded loop.
 
 ![Level 1 transfers](results/plots/level1_transfers.png)
 
-*Median across 3 full runs (lines; ranges across runs are in the table above).*
+*Median across 3 full runs.*
 
 ### Findings
 
