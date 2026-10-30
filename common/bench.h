@@ -228,7 +228,7 @@ public:
         const double gbps   = r.bytes > 0 ? r.bytes / sec / 1e9 : 0.0;
         const double gflops = r.flops > 0 ? r.flops / sec / 1e9 : 0.0;
         std::fprintf(f_, "%s,%s,%lld,%.6f,%.6f,%.6f,%.6f,%d,%d,",
-                     r.level.c_str(), r.kernel.c_str(), r.n,
+                     quoted(r.level).c_str(), quoted(r.kernel).c_str(), r.n,
                      r.t.median, r.t.p10, r.t.p90, r.t.min, r.t.trials, r.t.reps);
         opt(gbps);
         opt(gflops);
@@ -239,6 +239,18 @@ public:
     }
 
 private:
+    // CSV text field (RFC 4180): wrap in quotes and double any quote inside,
+    // so names containing commas, e.g. "CPU (1 core, ikj)", stay one field
+    static std::string quoted(const std::string& s)
+    {
+        std::string out = "\"";
+        for (char c : s) {
+            if (c == '"') out += '"';
+            out += c;
+        }
+        out += '"';
+        return out;
+    }
     void opt(double v) { v > 0 ? std::fprintf(f_, "%.4f,", v) : std::fprintf(f_, ","); }
     FILE* f_ = nullptr;
 };
