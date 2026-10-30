@@ -119,7 +119,7 @@ laptop plugged in. CPU baseline = single-threaded loop.
 
 ![Level 1 transfers](results/plots/level1_transfers.png)
 
-*Median across 3 full runs; error bars: min–max across runs.*
+*Median across 3 full runs (lines; ranges across runs are in the table above).*
 
 ### Findings
 
@@ -190,7 +190,7 @@ The kernels compute C = A·B for square FP32 matrices, n = 2048 (17.18 GFLOP), w
 [-1, 1] (fixed seed); correctness is checked against cuBLAS with max abs error < 1e-2.
 
 **Test setup:** same hardware as Level 1; GPU times are the median of 15 trials per run, median across 3 runs,
-after a 500 ms GPU warm-up; CPU is a single run (single-threaded i-k-j loop).
+after a 500 ms GPU warm-up; CPU baseline: 5 trials of one run each, timed after all GPU measurements (single-threaded i-k-j loop).
 
 <!-- BEGIN:level3 -->
 | version | ms (median) | range across runs | GFLOPS | % of FP32 ceiling | % of cuBLAS | max err | check |
