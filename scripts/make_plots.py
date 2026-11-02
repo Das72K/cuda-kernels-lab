@@ -73,6 +73,10 @@ def pick(agg, level, kernel=None, n=None):
     return sel
 
 
+def has(agg, level):
+    return len(pick(agg, level)) > 0
+
+
 def one(agg, level, kernel, n=None):
     sel = pick(agg, level, kernel, n)
     if len(sel) != 1:
@@ -128,6 +132,11 @@ def table_summary(agg, bw, peak, runs):
         ["3 SGEMM", "n = 2048, FP32", "compute", f"v4: {l3['gflops'] / 1e3:.2f} TFLOPS",
          f"{l3['pct_library']:.0f}% of cuBLAS", f"{100 * l3['gflops'] / peak:.0f}% of {peak / 1e3:.1f} TFLOPS"],
     ]
+    if has(agg, "4_blur"):
+        l4 = one(agg, "4_blur", "v4 separable, fused smem")
+        rows.append(["4 Gaussian blur 7×7", f"{l4['n'] / 1e6:.1f} MP image", "memory",
+                     f"v4: {l4['ms']:.2f} ms ({l4['gbps']:.0f} GB/s eff.)", f"{l4['pct_library'] / 100:.1f}× NPP speed",
+                     f"{100 * l4['gbps'] / bw:.0f}% of {bw:.0f} GB/s"])
     text = md_table(["Level", "Workload", "Bound by", "Best own kernel", "vs library", "vs measured ceiling"], rows)
     text += (f"\nCeilings measured on this GPU by `bench/peak.cu`: DRAM {bw:.1f} GB/s (best read test), "
              f"FP32 {peak / 1e3:.2f} TFLOPS (FMA test). All values: median across {runs} full runs.\n")
@@ -182,6 +191,17 @@ def table_level3(agg, peak):
                      "—" if cpu else f"{r['pct_library']:.1f}%", f"{r['max_err']:.1e}", check(r)])
     return md_table(["version", "ms (median)", "range across runs", "GFLOPS",
                      "% of FP32 ceiling", "% of cuBLAS", "max err", "check"], rows)
+
+
+def table_level4(agg, bw):
+    rows = []
+    for _, r in ordered(pick(agg, "4_blur")).iterrows():
+        gpu = not r["kernel"].startswith("CPU")
+        rows.append([r["kernel"], f"{r['ms']:.3f}", rng(r["ms_lo"], r["ms_hi"], 3), f"{r['gbps']:.1f}",
+                     f"{100 * r['gbps'] / bw:.1f}%" if gpu else "—",
+                     f"{r['pct_library']:.1f}%" if gpu else "—", f"{r['max_err']:.1e}", check(r)])
+    return md_table(["version", "ms (median)", "range across runs", "effective GB/s",
+                     "% of DRAM ceiling", "% of NPP speed", "max err", "check"], rows)
 
 
 def table_sweep(agg):
@@ -241,6 +261,24 @@ def plot_roofline(agg, bw, peak, path):
         left = (i % 2 == 0)
         ax.annotate(short(r["kernel"]), (ai3, r["gflops"]), xytext=(-8 if left else 8, -3),
                     textcoords="offset points", fontsize=7, ha="right" if left else "left")
+
+    # Level 4: 49 multiply-adds (98 FLOPs) per 8 ideal bytes (2D-equivalent FLOPs for the separable versions);
+    # versions within 10% of each other share one label, labels on the right
+    if has(agg, "4_blur"):
+        ai4 = 98 / 8
+        pts4 = [(r["gflops"], short(r["kernel"])) for _, r in ordered(pick(agg, "4_blur")).iterrows()
+                if not r["kernel"].startswith("CPU")]
+        ax.scatter([ai4] * len(pts4), [y for y, _ in pts4], color="tab:purple", s=30, zorder=3,
+                   label="L4 blur (2D-equivalent FLOPs)")
+        groups4 = []
+        for y, name in sorted(pts4):
+            if groups4 and y <= groups4[-1][0] * 1.10:
+                groups4[-1][1].append(name)
+            else:
+                groups4.append([y, [name]])
+        for y, names in groups4:
+            ax.annotate(", ".join(names), (ai4, y), xytext=(12, -3), textcoords="offset points",
+                        fontsize=7, ha="left")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -334,6 +372,28 @@ def plot_sweep(agg, peak, path):
     plt.close(fig)
 
 
+def plot_blur_crop(path):
+    """Side-by-side center crop: input image vs the saved v4 output, so the blur is visible."""
+    from PIL import Image
+    src = ROOT / "data" / "test_image.png"
+    out = ROOT / "results" / "images" / "level4_blur.png"
+    if not (src.exists() and out.exists()):
+        print("blur crop: input or output image missing, skipped")
+        return
+    a, b = Image.open(src), Image.open(out)
+    w, h = a.size
+    cw, ch = 480, 270
+    box = (w // 2 - cw // 2, h // 2 - ch // 2, w // 2 + cw // 2, h // 2 + ch // 2)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.2))
+    for ax, img, title in zip(axes, (a, b), ("input (center crop)", "v4 output: 7x7 Gaussian, sigma 1.5")):
+        ax.imshow(img.crop(box), cmap="gray", vmin=0, vmax=255, interpolation="nearest")
+        ax.set_title(title, fontsize=9)
+        ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 # ================================================================== README injection
 def inject(text, name, content):
     pattern = re.compile(rf"(<!-- BEGIN:{name} -->\n).*?(<!-- END:{name} -->)", re.S)
@@ -363,6 +423,8 @@ def main():
         "level3":       table_level3(agg, peak),
         "level3_sweep": table_sweep(agg),
     }
+    if has(agg, "4_blur"):
+        tables["level4"] = table_level4(agg, bw)
     for name, content in tables.items():
         (TABLES / f"{name}.md").write_text(content)
 
@@ -380,6 +442,14 @@ def main():
               PLOTS / "level3_ladder.png")
     plot_transfers(agg, PLOTS / "level1_transfers.png")
     plot_sweep(agg, peak, PLOTS / "level3_sweep.png")
+    if has(agg, "4_blur"):
+        l4 = ordered(pick(agg, "4_blur").query("not kernel.str.startswith('CPU')", engine="python"))
+        bar_chart(l4, "gbps", "gbps_lo", "gbps_hi", "effective GB/s (median, range across runs)",
+                  "Level 4: 7x7 Gaussian blur vs the DRAM ceiling",
+                  [(bw, f"measured ceiling {bw:.0f} GB/s", ("--", "black"))], PLOTS / "level4_ladder.png")
+        plot_blur_crop(PLOTS / "level4_blur_crop.png")
+    else:
+        print("no Level 4 data yet: Level 4 tables and plots skipped")
 
     text = README.read_text()
     for name, content in tables.items():

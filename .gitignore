@@ -32,3 +32,6 @@ Thumbs.db
 
 # Python
 .venv/
+
+# Original photos (only the processed data/test_image.png is committed)
+data/source.*

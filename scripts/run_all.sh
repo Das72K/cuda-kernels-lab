@@ -9,6 +9,7 @@ RAW=results/raw
 COOLDOWN=10   # seconds of idle between programs, so heat from one doesn't slow the next
 RUNS=${RUNS:-3}   # full repetitions; override with RUNS=1 ./scripts/run_all.sh
 mkdir -p "$RAW"
+mkdir -p results/images
 
 echo "== Build (Release) =="
 cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release > /dev/null
@@ -46,6 +47,7 @@ for r in $(seq 1 "$RUNS"); do
     run level1_vector_add level1_vector_add "$dir"
     run level2_reduction  level2_reduction  "$dir"
     run level3_matmul     level3_matmul     "$dir"
+    run level4_image_filter level4_image_filter "$dir"
 done
 
 echo
