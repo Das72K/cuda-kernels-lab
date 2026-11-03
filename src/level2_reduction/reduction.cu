@@ -209,6 +209,7 @@ const int* reduceMultiPass(ReduceKernel kernel, int elemsPerBlock,
 
 int main(int argc, char** argv)
 {
+    bench::parseProfileFlag(argc, argv);
     const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
     const bench::DeviceInfo dev     = bench::queryDevice();
     bench::printDevice(dev);
@@ -254,7 +255,7 @@ int main(int argc, char** argv)
     CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
     const bench::Stats cub_t = bench::timeGpu([&] {
         CUDA_CHECK(cub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n));
-    });
+    }, "CUB DeviceReduce::Sum");
     CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
     const int cub_result = result;
     gpuRows.push_back({"CUB DeviceReduce::Sum", cub_t, cub_result});
@@ -263,7 +264,7 @@ int main(int argc, char** argv)
     const bench::Stats t0 = bench::timeGpu([&] {
         CUDA_CHECK(cudaMemsetAsync(d_out, 0, sizeof(int)));   // reset the counter each run
         reduceV0Atomic<<<maxBlocks, BLOCK>>>(d_in, d_out, n);
-    });
+    }, "v0 atomicAdd");
     CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(int), cudaMemcpyDeviceToHost));
     gpuRows.push_back({"v0 atomicAdd", t0, result});
 
@@ -271,7 +272,7 @@ int main(int argc, char** argv)
     auto runTree = [&](const char* name, ReduceKernel kernel, int elemsPerBlock) {
         const bench::Stats t = bench::timeGpu([&] {
             d_res = reduceMultiPass(kernel, elemsPerBlock, d_in, d_bufA, d_bufB, n);
-        });
+        }, name);
         CUDA_CHECK(cudaMemcpy(&result, d_res, sizeof(int), cudaMemcpyDeviceToHost));
         gpuRows.push_back({name, t, result});
     };

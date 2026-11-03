@@ -62,7 +62,7 @@ GpuResult measureGpu(int n)
     // ---------- GPU: kernel only ----------
     const bench::Stats kern = bench::timeGpu([&] {
         vectorAdd<<<blocks, threads>>>(d_a, d_b, d_c, n);
-    });
+    }, ("GPU kernel n=" + std::to_string(n)).c_str());
 
     // ---------- GPU: total trip, pageable host memory ----------
     const bench::Stats total = bench::timeGpu([&] {
@@ -70,7 +70,7 @@ GpuResult measureGpu(int n)
         CUDA_CHECK(cudaMemcpy(d_b, h_b.data(), bytes, cudaMemcpyHostToDevice));
         vectorAdd<<<blocks, threads>>>(d_a, d_b, d_c, n);
         CUDA_CHECK(cudaMemcpy(h_c_gpu.data(), d_c, bytes, cudaMemcpyDeviceToHost));
-    });
+    }, ("GPU total pageable n=" + std::to_string(n)).c_str());
     int errors = 0;
     for (int i = 0; i < n; i++) {
         if (h_c_gpu[i] != h_c_cpu[i]) errors++;
@@ -88,7 +88,7 @@ GpuResult measureGpu(int n)
         CUDA_CHECK(cudaMemcpy(d_b, p_b, bytes, cudaMemcpyHostToDevice));
         vectorAdd<<<blocks, threads>>>(d_a, d_b, d_c, n);
         CUDA_CHECK(cudaMemcpy(p_c, d_c, bytes, cudaMemcpyDeviceToHost));
-    });
+    }, ("GPU total pinned n=" + std::to_string(n)).c_str());
     for (int i = 0; i < n; i++) {
         if (p_c[i] != h_c_cpu[i]) errors++;
     }
@@ -167,6 +167,7 @@ void reportSize(const GpuResult& g, const bench::Stats& cpu, const bench::Device
 
 int main(int argc, char** argv)
 {
+    bench::parseProfileFlag(argc, argv);
     const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
     const bench::DeviceInfo dev     = bench::queryDevice();
     bench::printDevice(dev);

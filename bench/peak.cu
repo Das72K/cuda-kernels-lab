@@ -106,6 +106,7 @@ __global__ void fmaKernel(float* sink, int iters, float a, float b)
 
 int main(int argc, char** argv)
 {
+    bench::parseProfileFlag(argc, argv);
     const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
     const bench::DeviceInfo dev     = bench::queryDevice();
     bench::printDevice(dev);
@@ -126,10 +127,10 @@ int main(int argc, char** argv)
     CUDA_CHECK(cudaMemset(d_in, 0, bytes));
 
     // ---------- measurements ----------
-    const bench::Stats copy = bench::timeGpu([&] { copyKernel<<<blocks, threads>>>(d_in, d_out, n4); });
-    const bench::Stats read = bench::timeGpu([&] { readKernel<<<blocks, threads>>>(d_in, d_sink, n4); });
-    const bench::Stats copyU = bench::timeGpu([&] { copyKernelUnrolled<<<blocks, threads>>>(d_in, d_out, n4); });
-    const bench::Stats readU = bench::timeGpu([&] { readKernelUnrolled<<<blocks, threads>>>(d_in, d_sink, n4); });
+    const bench::Stats copy = bench::timeGpu([&] { copyKernel<<<blocks, threads>>>(d_in, d_out, n4); }, "copy (read + write)");
+    const bench::Stats read = bench::timeGpu([&] { readKernel<<<blocks, threads>>>(d_in, d_sink, n4); }, "read-only");
+    const bench::Stats copyU = bench::timeGpu([&] { copyKernelUnrolled<<<blocks, threads>>>(d_in, d_out, n4); }, "copy unrolled x4");
+    const bench::Stats readU = bench::timeGpu([&] { readKernelUnrolled<<<blocks, threads>>>(d_in, d_sink, n4); }, "read-only unrolled x4");
 
     constexpr int CHAINS = 8;
     const int     iters  = 8192;
@@ -143,7 +144,7 @@ int main(int argc, char** argv)
     const double fmaFlops = double(fmaBlocks) * threads * iters * CHAINS * 2.0;   // one FMA = 2 FLOP
     const bench::Stats fma = bench::timeGpu([&] {
         fmaKernel<CHAINS><<<fmaBlocks, threads>>>(d_sink, iters, 0.999999f, 1e-6f);
-    });
+    }, "FMA (FP32)");
     std::printf("FMA launch: %d blocks per SM x %d SMs x 8 waves = %d blocks\n",
                 blocksPerSm, dev.sm_count, fmaBlocks);
 

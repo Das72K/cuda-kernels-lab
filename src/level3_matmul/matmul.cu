@@ -283,19 +283,21 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
         const bench::Stats ref = bench::timeGpu([&] {
             CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
                                      &alpha, d_B, n, d_A, n, &beta, d_C, n));
-        });
+        }, ("cuBLAS sgemm n=" + std::to_string(n)).c_str());
         CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));
 
         const dim3 block(TILE, TILE);
         const dim3 grid(n / BN, n / BM);
 
         CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        const bench::Stats s3 = bench::timeGpu([&] { matmulV3<<<grid, block>>>(d_A, d_B, d_C, n); });
+        const bench::Stats s3 = bench::timeGpu([&] { matmulV3<<<grid, block>>>(d_A, d_B, d_C, n); },
+                                                ("v3 register tiling 4x4 n=" + std::to_string(n)).c_str());
         CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
         const float err3 = maxAbsDiff(h_C, h_ref);
 
         CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        const bench::Stats s4 = bench::timeGpu([&] { matmulV4<<<grid, block>>>(d_A, d_B, d_C, n); });
+        const bench::Stats s4 = bench::timeGpu([&] { matmulV4<<<grid, block>>>(d_A, d_B, d_C, n); },
+                                                ("v4 float4 + transposed A n=" + std::to_string(n)).c_str());
         CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
         const float err4 = maxAbsDiff(h_C, h_ref);
 
@@ -331,6 +333,7 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
 
 int main(int argc, char** argv)
 {
+    bench::parseProfileFlag(argc, argv);
     const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
     const bench::DeviceInfo dev     = bench::queryDevice();
     bench::printDevice(dev);
@@ -365,7 +368,7 @@ int main(int argc, char** argv)
         CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n,
                                  &alpha, d_B, n, d_A, n, &beta, d_C, n));
     };
-    const bench::Stats ref = bench::timeGpu(cublasRun);
+    const bench::Stats ref = bench::timeGpu(cublasRun, "cuBLAS sgemm (reference)");
     CUDA_CHECK(cudaMemcpy(h_ref.data(), d_C, bytes, cudaMemcpyDeviceToHost));
 
     // ---------- results table + CSV ----------
@@ -412,7 +415,7 @@ int main(int argc, char** argv)
     // reset d_C so a kernel that writes nothing can't "pass" with old results, time it, check it
     auto runKernel = [&](const char* name, auto launch) {
         CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-        const bench::Stats t = bench::timeGpu(launch);
+        const bench::Stats t = bench::timeGpu(launch, name);
         report(name, t, errOfDC(), kTol, true);
     };
 
@@ -435,7 +438,7 @@ int main(int argc, char** argv)
     // ---------- cuBLAS with TF32 Tensor Cores (lower precision: 10-bit mantissa) ----------
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH));
     CUDA_CHECK(cudaMemset(d_C, 0, bytes));
-    const bench::Stats tf32 = bench::timeGpu(cublasRun);
+    const bench::Stats tf32 = bench::timeGpu(cublasRun, "cuBLAS TF32 Tensor Cores");
     report("cuBLAS TF32 Tensor Cores", tf32, errOfDC(), 1e-1f, true, false);   // looser tolerance: TF32 rounds inputs
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH));
 

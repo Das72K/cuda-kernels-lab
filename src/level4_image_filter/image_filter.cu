@@ -272,6 +272,7 @@ std::string argValue(int argc, char** argv, const char* key, const char* fallbac
 
 int main(int argc, char** argv)
 {
+    bench::parseProfileFlag(argc, argv);
     const std::string       csvPath = bench::csvPathFromArgs(argc, argv);
     const std::string       imgPath = argValue(argc, argv, "--image", "data/test_image.png");
     const std::string       outDir  = argValue(argc, argv, "--outdir", "results/images");
@@ -319,7 +320,7 @@ int main(int argc, char** argv)
     // reset the output, time the launch, check against the CPU reference
     auto runKernel = [&](const char* name, auto launch) {
         CUDA_CHECK(cudaMemset(d_out, 0, pixels * sizeof(float)));
-        const bench::Stats t = bench::timeGpu(launch);
+        const bench::Stats t = bench::timeGpu(launch, name);
         CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, pixels * sizeof(float), cudaMemcpyDeviceToHost));
         gpuRows.push_back({name, t, maxAbsDiff(h_out, h_ref)});
     };

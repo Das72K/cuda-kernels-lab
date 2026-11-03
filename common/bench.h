@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include <nvtx3/nvToolsExt.h>
+
 #include "cuda_utils.h"
 
 namespace bench {
@@ -65,12 +67,48 @@ inline TimingConfig cpuDefaults()
     return c;
 }
 
+// Profiling mode (--profile): every GPU measurement runs its launch ONCE inside an NVTX range named after
+// the version, so Nsight Compute can attribute each profiled launch to it; CPU timing is skipped.
+// Timings printed in this mode are placeholders and must not be used.
+inline bool& profileMode()
+{
+    static bool on = false;
+    return on;
+}
+
+inline void parseProfileFlag(int argc, char** argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--profile") == 0) profileMode() = true;
+    }
+    if (profileMode()) {
+        std::printf("PROFILE MODE: one launch per version, labelled with NVTX; timings below are NOT meaningful\n");
+    }
+}
+
+inline Stats placeholderStats()
+{
+    Stats s;
+    s.median = s.p10 = s.p90 = s.min = 1.0;   // nonzero, so the tables can still divide by it
+    s.trials = 1;
+    s.reps   = 1;
+    return s;
+}
+
 // ============================================================
 // GPU timing: first launch (error check) -> time-based warm-up -> calibrate -> trials
 // ============================================================
 template <typename F>
-Stats timeGpu(F launch, const TimingConfig& cfg = TimingConfig{})
+Stats timeGpu(F launch, const char* name = nullptr, const TimingConfig& cfg = TimingConfig{})
 {
+    if (profileMode()) {
+        nvtxRangePushA(name ? name : "unnamed");
+        launch();
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        nvtxRangePop();
+        return placeholderStats();
+    }
     launch();
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -109,6 +147,7 @@ Stats timeGpu(F launch, const TimingConfig& cfg = TimingConfig{})
 template <typename F>
 Stats timeCpu(F run, const TimingConfig& cfg = cpuDefaults())
 {
+    if (profileMode()) return placeholderStats();
     using clock = std::chrono::steady_clock;
     auto ms_since = [](clock::time_point t0) {
         return std::chrono::duration<double, std::milli>(clock::now() - t0).count();
