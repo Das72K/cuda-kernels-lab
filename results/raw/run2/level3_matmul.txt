@@ -5,20 +5,20 @@ n = 2048 (16.8 MB per matrix), 17.18 GFLOP per multiply, block = 16x16
 Times: median of 15 trials (p10/p90 spread); %peak uses the driver-reported clock
 
 version                            ms        p10        p90     GFLOPS   %peak  % cuBLAS    max err  check
-cuBLAS sgemm (reference)        2.090      2.081      2.115     8220.2   78.1%    100.0%   0.00e+00   PASS
-v0 naive (uncoalesced)         85.556     85.540     85.616      200.8    1.9%      2.4%   0.00e+00   PASS
-v1 naive (coalesced)           20.194     20.174     20.212      850.7    8.1%     10.3%   0.00e+00   PASS
-v2 tiled (shared mem)          15.497     15.487     15.571     1108.6   10.5%     13.5%   0.00e+00   PASS
-v3 register tiling 4x4          3.103      3.101      3.114     5535.7   52.6%     67.3%   0.00e+00   PASS
-v4 float4 + transposed A        2.955      2.951      2.979     5814.0   55.3%     70.7%   0.00e+00   PASS
-cuBLAS TF32 Tensor Cores        1.347      1.343      1.364    12757.0       -    155.2%   2.01e-02   PASS
+cuBLAS sgemm (reference)        2.091      2.081      2.115     8216.9   78.1%    100.0%   0.00e+00   PASS
+v0 naive (uncoalesced)         85.549     85.520     85.583      200.8    1.9%      2.4%   0.00e+00   PASS
+v1 naive (coalesced)           20.168     20.163     20.207      851.9    8.1%     10.4%   0.00e+00   PASS
+v2 tiled (shared mem)          15.489     15.484     15.584     1109.2   10.5%     13.5%   0.00e+00   PASS
+v3 register tiling 4x4          3.106      3.102      3.114     5532.0   52.6%     67.3%   0.00e+00   PASS
+v4 float4 + transposed A        2.950      2.948      2.960     5823.9   55.4%     70.9%   0.00e+00   PASS
+cuBLAS TF32 Tensor Cores        1.353      1.342      1.367    12693.3       -    154.5%   2.01e-02   PASS
 
 Size sweep: GFLOPS (% of cuBLAS)
        n       cuBLAS                     v3                     v4  check
-     512       5469.4        3920.5 ( 71.7%)        4327.4 ( 79.1%)   PASS
-    1024       7474.7        5311.9 ( 71.1%)        5670.9 ( 75.9%)   PASS
-    2048       8229.2        5520.6 ( 67.1%)        5810.3 ( 70.6%)   PASS
-    4096       8386.6        5370.7 ( 64.0%)        5463.4 ( 65.1%)   PASS
+     512       5482.7        3925.7 ( 71.6%)        4322.8 ( 78.8%)   PASS
+    1024       7462.1        5316.9 ( 71.3%)        5675.6 ( 76.1%)   PASS
+    2048       8234.0        5511.6 ( 66.9%)        5809.8 ( 70.6%)   PASS
+    4096       8368.2        5353.1 ( 64.0%)        5461.1 ( 65.3%)   PASS
 
 CPU baseline (timed after all GPU measurements):
-CPU (1 core, ikj)            2561.923   2380.681   2628.416        6.7       -      0.1%   3.81e-05   PASS
+CPU (1 core, ikj)            2392.701   2302.119   2583.628        7.2       -      0.1%   3.81e-05   PASS

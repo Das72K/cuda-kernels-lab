@@ -50,10 +50,11 @@ Binaries land in `build/bin/`. Kernels are compiled with `-lineinfo` so Nsight C
 | Level | Workload | Bound by | Best own kernel | vs library | vs measured ceiling |
 |---|---|---|---|---|---|
 | 1 Vector add | 100M floats | memory | 180 GB/s | — | 96% of 188 GB/s |
-| 2 Reduction | 33.6M ints | memory | v5: 185 GB/s | 99% of CUB | 98% of 188 GB/s |
-| 3 SGEMM | n = 2048, FP32 | compute | v4: 5.81 TFLOPS | 71% of cuBLAS | 44% of 13.2 TFLOPS |
+| 2 Reduction | 33.6M ints | memory | v5: 184 GB/s | 99% of CUB | 98% of 188 GB/s |
+| 3 SGEMM | n = 2048, FP32 | compute | v4: 5.82 TFLOPS | 71% of cuBLAS | 44% of 13.1 TFLOPS |
+| 4 Gaussian blur 7×7 | 8.3 MP image | memory | v4: 0.46 ms (145 GB/s eff.) | 2.3× NPP speed | 77% of 188 GB/s |
 
-Ceilings measured on this GPU by `bench/peak.cu`: DRAM 187.6 GB/s (best read test), FP32 13.16 TFLOPS (FMA test). All values: median across 3 full runs.
+Ceilings measured on this GPU by `bench/peak.cu`: DRAM 187.6 GB/s (best read test), FP32 13.14 TFLOPS (FMA test). All values: median across 3 full runs.
 <!-- END:summary -->
 
 ![Measured roofline](results/plots/roofline.png)
@@ -63,11 +64,11 @@ Ceilings measured on this GPU by `bench/peak.cu`: DRAM 187.6 GB/s (best read tes
 <!-- BEGIN:peaks -->
 | test | ms (median) | range across runs | result | % of 192 GB/s spec |
 |---|---|---|---|---|
-| copy (read + write) | 6.126 | 6.125–6.129 | 175.3 GB/s | 91.3% |
-| read-only | 2.862 | 2.861–2.872 | 187.6 GB/s | 97.7% |
-| copy unrolled x4 | 6.167 | 6.149–6.170 | 174.1 GB/s | 90.7% |
-| read-only unrolled x4 | 2.862 | 2.861–2.862 | 187.6 GB/s | 97.7% |
-| FMA (FP32) | 2.448 | 2.437–2.449 | 13.16 TFLOPS | — |
+| copy (read + write) | 6.130 | 6.124–6.141 | 175.2 GB/s | 91.2% |
+| read-only | 2.862 | 2.861–2.863 | 187.6 GB/s | 97.7% |
+| copy unrolled x4 | 6.168 | 6.159–6.174 | 174.1 GB/s | 90.7% |
+| read-only unrolled x4 | 2.861 | 2.860–2.869 | 187.6 GB/s | 97.7% |
+| FMA (FP32) | 2.451 | 2.442–2.453 | 13.14 TFLOPS | — |
 <!-- END:peaks -->
 
 ## How to reproduce
@@ -112,13 +113,13 @@ laptop plugged in. CPU baseline = single-threaded loop.
 <!-- BEGIN:level1 -->
 | n | CPU ms | kernel ms | kernel GB/s | kernel vs CPU | total ms (pageable) | vs CPU | total ms (pinned) | vs CPU | check |
 |---|---|---|---|---|---|---|---|---|---|
-| 1,000 | 0.0001 | 0.0094 | 1.3 | 0.0× | 0.100 | 0.00× | 0.139 | 0.00× | PASS |
-| 10,000 | 0.0013 | 0.0084 | 14.4 | 0.2× | 0.110 | 0.01× | 0.162 | 0.01× | PASS |
-| 100,000 | 0.0173 | 0.0084 | 143.3 | 2.1× | 0.288 | 0.06× | 0.275 | 0.06× | PASS |
-| 1,000,000 | 0.5512 | 0.0112 | 1068.0 | 49.1× | 1.699 | 0.32× | 1.259 | 0.44× | PASS |
-| 10,000,000 | 6.9007 | 0.6652 | 180.4 | 10.4× | 17.613 | 0.39× | 10.534 | 0.66× | PASS |
-| 50,000,000 | 34.0384 | 3.5174 | 170.6 | 9.7× | 86.678 | 0.39× | 50.976 | 0.67× | PASS |
-| 100,000,000 | 67.2103 | 6.6657 | 180.0 | 10.1× | 176.745 | 0.38× | 104.882 | 0.64× | PASS |
+| 1,000 | 0.0001 | 0.0079 | 1.5 | 0.0× | 0.115 | 0.00× | 0.135 | 0.00× | PASS |
+| 10,000 | 0.0012 | 0.0085 | 14.1 | 0.1× | 0.097 | 0.01× | 0.159 | 0.01× | PASS |
+| 100,000 | 0.0174 | 0.0081 | 147.9 | 2.1× | 0.320 | 0.05× | 0.257 | 0.07× | PASS |
+| 1,000,000 | 0.5619 | 0.0114 | 1055.0 | 49.4× | 1.884 | 0.30× | 1.300 | 0.43× | PASS |
+| 10,000,000 | 7.0931 | 0.6690 | 179.4 | 10.6× | 18.184 | 0.39× | 10.623 | 0.67× | PASS |
+| 50,000,000 | 34.7206 | 3.5119 | 170.8 | 9.9× | 91.051 | 0.38× | 54.640 | 0.64× | PASS |
+| 100,000,000 | 71.5206 | 6.6606 | 180.2 | 10.7× | 178.178 | 0.40× | 105.020 | 0.68× | PASS |
 <!-- END:level1 -->
 
 ![Level 1 transfers](results/plots/level1_transfers.png)
@@ -155,14 +156,14 @@ peak DRAM bandwidth: measured ceilings (see Measured ceilings).
 <!-- BEGIN:level2 -->
 | version | ms (median) | range across runs | GB/s | % of measured ceiling | % of CUB | check |
 |---|---|---|---|---|---|---|
-| CPU (1 core) | 10.6980 | 10.6271–12.6679 | 12.5 | — | — | PASS |
-| v0 atomicAdd | 0.7227 | 0.7212–0.7229 | 185.7 | 99.0% | 99.9% | PASS |
-| v1 tree interleaved | 1.7985 | 1.7932–1.8026 | 74.6 | 39.8% | 40.1% | PASS |
-| v2 tree strided | 1.2577 | 1.2548–1.2621 | 106.7 | 56.9% | 57.4% | PASS |
-| v3 tree sequential | 1.2186 | 1.2134–1.2197 | 110.1 | 58.7% | 59.2% | PASS |
-| v4 first add on load | 0.7275 | 0.7274–0.7306 | 184.5 | 98.3% | 99.2% | PASS |
-| v5 warp shuffle | 0.7271 | 0.7268–0.7298 | 184.6 | 98.4% | 99.3% | PASS |
-| CUB DeviceReduce::Sum | 0.7220 | 0.7218–0.7237 | 185.9 | 99.1% | 100.0% | PASS |
+| CPU (1 core) | 11.8881 | 10.7131–12.7918 | 11.3 | — | — | PASS |
+| v0 atomicAdd | 0.7186 | 0.7186–0.7237 | 186.8 | 99.5% | 100.5% | PASS |
+| v1 tree interleaved | 1.7963 | 1.7929–1.8003 | 74.7 | 39.8% | 40.2% | PASS |
+| v2 tree strided | 1.2576 | 1.2544–1.2579 | 106.7 | 56.9% | 57.4% | PASS |
+| v3 tree sequential | 1.2160 | 1.2159–1.2194 | 110.4 | 58.8% | 59.3% | PASS |
+| v4 first add on load | 0.7303 | 0.7286–0.7305 | 183.8 | 98.0% | 98.9% | PASS |
+| v5 warp shuffle | 0.7289 | 0.7265–0.7304 | 184.1 | 98.1% | 99.0% | PASS |
+| CUB DeviceReduce::Sum | 0.7221 | 0.7201–0.7228 | 185.9 | 99.1% | 100.0% | PASS |
 <!-- END:level2 -->
 
 ![Level 2 ladder](results/plots/level2_ladder.png)
@@ -199,14 +200,14 @@ after a 500 ms GPU warm-up; CPU baseline: 5 trials of one run each, timed after 
 <!-- BEGIN:level3 -->
 | version | ms (median) | range across runs | GFLOPS | % of FP32 ceiling | % of cuBLAS | max err | check |
 |---|---|---|---|---|---|---|---|
-| CPU (1 core, ikj) | 2561.923 | 2218.346–2574.875 | 7 | — | — | 3.8e-05 | PASS |
-| v0 naive (uncoalesced) | 85.556 | 85.548–85.570 | 201 | 1.5% | 2.4% | 0.0e+00 | PASS |
-| v1 naive (coalesced) | 20.180 | 20.171–20.194 | 851 | 6.5% | 10.3% | 0.0e+00 | PASS |
-| v2 tiled (shared mem) | 15.497 | 15.485–15.530 | 1109 | 8.4% | 13.5% | 0.0e+00 | PASS |
-| v3 register tiling 4x4 | 3.103 | 3.098–3.105 | 5536 | 42.1% | 67.2% | 0.0e+00 | PASS |
-| v4 float4 + transposed A | 2.955 | 2.944–2.957 | 5814 | 44.2% | 70.6% | 0.0e+00 | PASS |
-| cuBLAS sgemm (reference) | 2.087 | 2.078–2.090 | 8232 | 62.6% | 100.0% | 0.0e+00 | PASS |
-| cuBLAS TF32 Tensor Cores | 1.346 | 1.342–1.347 | 12767 | — | 155.1% | 2.0e-02 | PASS |
+| CPU (1 core, ikj) | 2338.222 | 2236.766–2392.701 | 7 | — | — | 3.8e-05 | PASS |
+| v0 naive (uncoalesced) | 85.549 | 85.089–85.564 | 201 | 1.5% | 2.4% | 0.0e+00 | PASS |
+| v1 naive (coalesced) | 20.168 | 20.105–20.182 | 852 | 6.5% | 10.4% | 0.0e+00 | PASS |
+| v2 tiled (shared mem) | 15.489 | 15.489–15.500 | 1109 | 8.4% | 13.5% | 0.0e+00 | PASS |
+| v3 register tiling 4x4 | 3.106 | 3.089–3.107 | 5532 | 42.1% | 67.3% | 0.0e+00 | PASS |
+| v4 float4 + transposed A | 2.950 | 2.939–2.951 | 5824 | 44.3% | 70.9% | 0.0e+00 | PASS |
+| cuBLAS sgemm (reference) | 2.091 | 2.089–2.100 | 8217 | 62.5% | 100.0% | 0.0e+00 | PASS |
+| cuBLAS TF32 Tensor Cores | 1.344 | 1.342–1.353 | 12783 | — | 155.4% | 2.0e-02 | PASS |
 <!-- END:level3 -->
 
 Size sweep: GFLOPS (% of cuBLAS)
@@ -214,10 +215,10 @@ Size sweep: GFLOPS (% of cuBLAS)
 <!-- BEGIN:level3_sweep -->
 | n | cuBLAS GFLOPS | v3 GFLOPS (% cuBLAS) | v4 GFLOPS (% cuBLAS) | check |
 |---|---|---|---|---|
-| 512 | 5475 | 3925 (71.7%) | 4327 (79.0%) | PASS |
-| 1024 | 7475 | 5312 (71.1%) | 5670 (75.7%) | PASS |
-| 2048 | 8229 | 5521 (67.1%) | 5810 (70.6%) | PASS |
-| 4096 | 8387 | 5360 (64.0%) | 5462 (65.1%) | PASS |
+| 512 | 5439 | 3926 (72.1%) | 4323 (79.0%) | PASS |
+| 1024 | 7462 | 5314 (71.3%) | 5673 (76.0%) | PASS |
+| 2048 | 8220 | 5512 (67.2%) | 5810 (70.6%) | PASS |
+| 4096 | 8368 | 5355 (64.0%) | 5461 (65.3%) | PASS |
 <!-- END:level3_sweep -->
 
 ![Level 3 ladder](results/plots/level3_ladder.png)
@@ -247,6 +248,68 @@ Size sweep: GFLOPS (% of cuBLAS)
 
 ```bash
 ./build/bin/level3_matmul
+```
+
+## Level 4: Gaussian blur (7x7, 3840x2160 image)
+
+The kernels apply a 7x7 Gaussian blur (sigma 1.5, clamp-to-edge borders) to a 3840x2160 grayscale image
+(NASA/JPL-Caltech PIA04413, see [data/README.md](data/README.md)); correctness is checked against a CPU
+reference with max abs error < 1e-4.
+
+**Test setup:** same hardware as Level 1; median of 15 trials per run, median across 3 runs; "effective" GB/s
+and GFLOPS divide the ideal work (8 bytes and 49 multiply-adds per pixel) by the time, so all versions are
+compared on the same job; the library reference is NPP `nppiFilterBorder_32f_C1R` (general 7x7 filter).
+
+<!-- BEGIN:level4 -->
+| version | ms (median) | range across runs | effective GB/s | % of DRAM ceiling | % of NPP speed | max err | check |
+|---|---|---|---|---|---|---|---|
+| CPU (1 core) | 194.462 | 194.404–195.365 | 0.3 | — | — | 0.0e+00 | PASS |
+| v0 naive | 0.997 | 0.997–1.000 | 66.6 | 35.5% | 106.9% | 3.0e-07 | PASS |
+| v1 constant-memory weights | 0.546 | 0.545–0.547 | 121.4 | 64.7% | 195.4% | 3.0e-07 | PASS |
+| v2 shared tile + halo | 0.692 | 0.688–0.693 | 95.8 | 51.1% | 154.3% | 3.0e-07 | PASS |
+| v3 separable, 2 passes | 0.729 | 0.729–0.731 | 91.0 | 48.5% | 146.2% | 4.8e-07 | PASS |
+| v4 separable, fused smem | 0.458 | 0.455–0.461 | 144.9 | 77.2% | 232.7% | 4.8e-07 | PASS |
+| NPP FilterBorder 7x7 | 1.066 | 1.066–1.068 | 62.2 | 33.2% | 100.0% | 3.0e-07 | PASS |
+<!-- END:level4 -->
+
+![Level 4 ladder](results/plots/level4_ladder.png)
+
+*Median across 3 full runs; error bars: min–max across runs.*
+
+![Level 4 blur](results/plots/level4_blur_crop.png)
+
+### Findings
+
+- **Overall:** the best version (v4) blurs the 8.3 MP image in ~0.46 ms: ~425× one CPU core, ~2.3× faster than
+  NPP's general 7×7 filter, and at ~77% of the memory floor (8 bytes per pixel at the measured 188 GB/s ceiling).
+- **Constant memory (v0 → v1, 1.8×):** v0 is not limited by DRAM (36% of the ceiling) but by load
+  instructions: two per tap (weight + pixel). With the weights in `__constant__` memory, the SASS shows them as
+  constant-bank operands of the `FFMA` instructions, so the weight loads disappear and the global loads per tap
+  halve.
+- **Shared-memory tiling did not help (v1 → v2, 0.79×):** v2 still reads 49 values per output, now from shared
+  memory instead of L1-cache hits, which on this GPU are equally fast (same on-chip hardware). Tiling reduces
+  memory traffic, but v1's bottleneck was load instructions, not traffic; the tile load, barrier and halo only
+  added cost. A documented negative result.
+- **Separable in two passes did not help either (v3, 0.95× vs v2):** a 7×7 Gaussian equals a 7-tap horizontal
+  pass followed by a 7-tap vertical pass (14 taps instead of 49), but the intermediate image goes through DRAM,
+  doubling the traffic to 16 bytes per pixel. That predicts at least ~0.71 ms before running; v3 measured
+  0.73 ms, about 97% of the DRAM ceiling in real traffic: memory-bound, as predicted.
+- **Combining both ideas wins (v4, 1.6× vs v3, 1.19× vs v1):** v4 performs the separable blur inside one kernel
+  through shared memory: the tile is loaded once (8 bytes per pixel) and each output needs about 19 taps. The
+  remaining gap to the floor comes mainly from the halo (14 rows are filtered horizontally to produce 8) and two
+  barriers per block.
+- **Specialized vs general:** NPP's `nppiFilterBorder_32f_C1R` accepts any 7×7 kernel, so it must apply all 49
+  taps; it runs at about the speed of the naive v0. v4 is faster because it knows the filter is a separable
+  Gaussian, so this compares a specialized kernel with a general library routine, not two equivalent
+  implementations.
+- **Metric note:** "effective" GB/s and GFLOPS divide the ideal work (8 bytes, 49 multiply-adds per pixel) by
+  the time, so every version is compared on the same job; v3 and v4 actually perform fewer FLOPs, and v3 moves
+  more bytes.
+
+### How to run
+
+```bash
+./build/bin/level4_image_filter
 ```
 
 ## How this project was built

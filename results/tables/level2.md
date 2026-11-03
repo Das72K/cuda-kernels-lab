@@ -1,10 +1,10 @@
 | version | ms (median) | range across runs | GB/s | % of measured ceiling | % of CUB | check |
 |---|---|---|---|---|---|---|
-| CPU (1 core) | 10.6980 | 10.6271–12.6679 | 12.5 | — | — | PASS |
-| v0 atomicAdd | 0.7227 | 0.7212–0.7229 | 185.7 | 99.0% | 99.9% | PASS |
-| v1 tree interleaved | 1.7985 | 1.7932–1.8026 | 74.6 | 39.8% | 40.1% | PASS |
-| v2 tree strided | 1.2577 | 1.2548–1.2621 | 106.7 | 56.9% | 57.4% | PASS |
-| v3 tree sequential | 1.2186 | 1.2134–1.2197 | 110.1 | 58.7% | 59.2% | PASS |
-| v4 first add on load | 0.7275 | 0.7274–0.7306 | 184.5 | 98.3% | 99.2% | PASS |
-| v5 warp shuffle | 0.7271 | 0.7268–0.7298 | 184.6 | 98.4% | 99.3% | PASS |
-| CUB DeviceReduce::Sum | 0.7220 | 0.7218–0.7237 | 185.9 | 99.1% | 100.0% | PASS |
+| CPU (1 core) | 11.8881 | 10.7131–12.7918 | 11.3 | — | — | PASS |
+| v0 atomicAdd | 0.7186 | 0.7186–0.7237 | 186.8 | 99.5% | 100.5% | PASS |
+| v1 tree interleaved | 1.7963 | 1.7929–1.8003 | 74.7 | 39.8% | 40.2% | PASS |
+| v2 tree strided | 1.2576 | 1.2544–1.2579 | 106.7 | 56.9% | 57.4% | PASS |
+| v3 tree sequential | 1.2160 | 1.2159–1.2194 | 110.4 | 58.8% | 59.3% | PASS |
+| v4 first add on load | 0.7303 | 0.7286–0.7305 | 183.8 | 98.0% | 98.9% | PASS |
+| v5 warp shuffle | 0.7289 | 0.7265–0.7304 | 184.1 | 98.1% | 99.0% | PASS |
+| CUB DeviceReduce::Sum | 0.7221 | 0.7201–0.7228 | 185.9 | 99.1% | 100.0% | PASS |

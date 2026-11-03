@@ -5,11 +5,11 @@ n = 33554432 (134.2 MB), block = 256 threads, CPU sum = 151006621
 Times: median of 15 trials (p10/p90 spread), after a time-based GPU warm-up
 
 version                       ms       p10       p90     GB/s   %peak   vs CPU          sum  check
-CPU (1 core)             10.6271    9.5019   11.9255     12.6       -      1.0    151006621   PASS
-CUB DeviceReduce::Sum     0.7237    0.7197    0.7284    185.5   96.6%     14.7    151006621   PASS
-v0 atomicAdd              0.7212    0.7183    0.7270    186.1   96.9%     14.7    151006621   PASS
-v1 tree interleaved       1.7932    1.7872    1.7947     74.8   39.0%      5.9    151006621   PASS
-v2 tree strided           1.2548    1.2502    1.2564    107.0   55.7%      8.5    151006621   PASS
-v3 tree sequential        1.2134    1.2088    1.2151    110.6   57.6%      8.8    151006621   PASS
-v4 first add on load      0.7306    0.7270    0.7333    183.7   95.7%     14.5    151006621   PASS
-v5 warp shuffle           0.7298    0.7262    0.7341    183.9   95.8%     14.6    151006621   PASS
+CPU (1 core)             10.7131    9.9281   11.8914     12.5       -      1.0    151006621   PASS
+CUB DeviceReduce::Sum     0.7201    0.7195    0.7222    186.4   97.1%     14.9    151006621   PASS
+v0 atomicAdd              0.7237    0.7176    0.7292    185.5   96.6%     14.8    151006621   PASS
+v1 tree interleaved       1.7929    1.7905    1.8019     74.9   39.0%      6.0    151006621   PASS
+v2 tree strided           1.2544    1.2536    1.2623    107.0   55.7%      8.5    151006621   PASS
+v3 tree sequential        1.2160    1.2126    1.2183    110.4   57.5%      8.8    151006621   PASS
+v4 first add on load      0.7286    0.7269    0.7368    184.2   95.9%     14.7    151006621   PASS
+v5 warp shuffle           0.7289    0.7257    0.7297    184.1   95.9%     14.7    151006621   PASS
