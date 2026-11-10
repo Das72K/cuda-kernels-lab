@@ -18,6 +18,7 @@ compile_commands.json
 
 # Profiler reports
 *.ncu-rep
+reports/*.ncu-rep
 *.nsys-rep
 *.qdrep
 *.sqlite

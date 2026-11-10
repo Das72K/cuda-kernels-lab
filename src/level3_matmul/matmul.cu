@@ -225,6 +225,77 @@ __global__ void matmulV4(const float* A, const float* B, float* C, int n)
 }
 
 // ============================================================
+// v5: bigger per-thread register tile, to take pressure off shared memory
+//     block computes a 128 x 128 tile of C with 16 x 16 threads,
+//     each thread computes 8 x 8 outputs held in registers.
+//     Per k step: 4 float4 shared loads for 64 FMAs (v4: 2 float4 loads for 16 FMAs)
+//     Requires n % 128 == 0.
+// ============================================================
+constexpr int V5_BM = 128, V5_BN = 128, V5_BK = 8;   // block tile sizes
+constexpr int V5_TM = 8,   V5_TN = 8;                // per-thread tile sizes
+constexpr int V5_PAD = 4;                            // row padding of the transposed A tile
+constexpr int V5_THREADS = (V5_BM / V5_TM) * (V5_BN / V5_TN);   // 256
+static_assert(V5_BM * V5_BK == 4 * V5_THREADS && V5_BK * V5_BN == 4 * V5_THREADS,
+              "v5: each thread must load exactly one float4 of A and one of B per tile");
+
+__global__ __launch_bounds__(V5_THREADS, 2) void matmulV5(const float* A, const float* B, float* C, int n)
+{
+    __shared__ __align__(16) float As[V5_BK][V5_BM + V5_PAD];   // transposed + padded A tile
+    __shared__ __align__(16) float Bs[V5_BK][V5_BN];
+
+    const int tx  = threadIdx.x;              // 0..15 -> which group of 8 columns
+    const int ty  = threadIdx.y;              // 0..15 -> which group of 8 rows
+    const int tid = ty * blockDim.x + tx;     // 0..255, linear id for loading
+
+    const int rowBase = blockIdx.y * V5_BM;
+    const int colBase = blockIdx.x * V5_BN;
+
+    float acc[V5_TM][V5_TN] = {};             // 64 running sums, all in registers
+
+    for (int t = 0; t < n; t += V5_BK) {
+        // 1. cooperative load: one float4 of A and one float4 of B per thread
+        //    A: 128 rows x 2 float4 per row, contiguous in global memory along k
+        const int ar = tid / (V5_BK / 4), ak = (tid % (V5_BK / 4)) * 4;
+        const float4 aGlobal = *reinterpret_cast<const float4*>(&A[(rowBase + ar) * n + (t + ak)]);
+        As[ak + 0][ar] = aGlobal.x;
+        As[ak + 1][ar] = aGlobal.y;
+        As[ak + 2][ar] = aGlobal.z;
+        As[ak + 3][ar] = aGlobal.w;
+
+        //    B: 8 rows x 32 float4 per row, one warp reads 128 contiguous bytes
+        const int br = tid / (V5_BN / 4), bc = (tid % (V5_BN / 4)) * 4;
+        *reinterpret_cast<float4*>(&Bs[br][bc]) =
+            *reinterpret_cast<const float4*>(&B[(t + br) * n + (colBase + bc)]);
+        __syncthreads();
+
+        // 2. for each k: 2 float4 of A and 2 float4 of B into registers, then 64 FMAs
+        #pragma unroll
+        for (int k = 0; k < V5_BK; k++) {
+            const float4 a0 = *reinterpret_cast<const float4*>(&As[k][ty * V5_TM]);
+            const float4 a1 = *reinterpret_cast<const float4*>(&As[k][ty * V5_TM + 4]);
+            const float4 b0 = *reinterpret_cast<const float4*>(&Bs[k][tx * V5_TN]);
+            const float4 b1 = *reinterpret_cast<const float4*>(&Bs[k][tx * V5_TN + 4]);
+            const float a[V5_TM] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+            const float b[V5_TN] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
+            #pragma unroll
+            for (int i = 0; i < V5_TM; i++)
+                #pragma unroll
+                for (int j = 0; j < V5_TN; j++)
+                    acc[i][j] += a[i] * b[j];
+        }
+        __syncthreads();
+    }
+
+    // 3. write each row of the 8 x 8 result with two float4 stores
+    #pragma unroll
+    for (int i = 0; i < V5_TM; i++) {
+        float* c = &C[(rowBase + ty * V5_TM + i) * n + (colBase + tx * V5_TN)];
+        *reinterpret_cast<float4*>(c)     = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+        *reinterpret_cast<float4*>(c + 4) = make_float4(acc[i][4], acc[i][5], acc[i][6], acc[i][7]);
+    }
+}
+
+// ============================================================
 // CPU baseline: i-k-j loop order (walks rows of B and C, which is cache-friendly)
 // ============================================================
 void matmulCPU(const float* A, const float* B, float* C, int n)
@@ -252,7 +323,7 @@ float maxAbsDiff(const std::vector<float>& x, const std::vector<float>& y)
 }
 
 // ============================================================
-// Size sweep: cuBLAS (FP32) vs v3 vs v4, correctness checked against cuBLAS
+// Size sweep: cuBLAS (FP32) vs v3 vs v4 vs v5, correctness checked against cuBLAS
 // ============================================================
 void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::DeviceInfo& dev)
 {
@@ -260,7 +331,7 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
     const float alpha = 1.0f, beta = 0.0f;
 
     std::printf("\nSize sweep: GFLOPS (%% of cuBLAS)\n");
-    std::printf("%8s %12s %22s %22s %6s\n", "n", "cuBLAS", "v3", "v4", "check");
+    std::printf("%8s %12s %22s %22s %22s %6s\n", "n", "cuBLAS", "v3", "v4", "v5", "check");
 
     for (int n : sizes) {
         const size_t elems = size_t(n) * n;
@@ -301,12 +372,33 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
         CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
         const float err4 = maxAbsDiff(h_C, h_ref);
 
+        const bool runV5 = n % V5_BM == 0 && n % V5_BN == 0 && n % V5_BK == 0;
+        bench::Stats s5;
+        float err5 = 0.0f;
+        if (runV5) {
+            const dim3 gridV5(n / V5_BN, n / V5_BM);
+            CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+            s5 = bench::timeGpu([&] { matmulV5<<<gridV5, block>>>(d_A, d_B, d_C, n); },
+                                ("v5 8x8 tile, float4 n=" + std::to_string(n)).c_str());
+            CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+            err5 = maxAbsDiff(h_C, h_ref);
+        } else {
+            std::printf("v5 skipped at n = %d: n must be a multiple of %d\n", n, V5_BM);
+        }
+
         auto gf = [&](const bench::Stats& t) { return flops / (t.median / 1e3) / 1e9; };
-        std::printf("%8d %12.1f %13.1f (%5.1f%%) %13.1f (%5.1f%%) %6s\n",
+        char v5Col[32];
+        if (runV5) {
+            std::snprintf(v5Col, sizeof v5Col, "%13.1f (%5.1f%%)", gf(s5), 100.0 * ref.median / s5.median);
+        } else {
+            std::snprintf(v5Col, sizeof v5Col, "%22s", "skipped");
+        }
+        std::printf("%8d %12.1f %13.1f (%5.1f%%) %13.1f (%5.1f%%) %s %6s\n",
                     n, gf(ref),
                     gf(s3), 100.0 * ref.median / s3.median,
                     gf(s4), 100.0 * ref.median / s4.median,
-                    (err3 < kTol && err4 < kTol) ? "PASS" : "FAIL");
+                    v5Col,
+                    (err3 < kTol && err4 < kTol && err5 < kTol) ? "PASS" : "FAIL");
 
         auto row = [&](const char* name, const bench::Stats& t, float err) {
             bench::Row r;
@@ -324,6 +416,7 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
         row("cuBLAS sgemm", ref, 0.0f);
         row("v3 register tiling 4x4", s3, err3);
         row("v4 float4 + transposed A", s4, err4);
+        if (runV5) row("v5 8x8 tile, float4", s5, err5);
 
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
@@ -433,6 +526,13 @@ int main(int argc, char** argv)
         runKernel("v4 float4 + transposed A", [&] { matmulV4<<<gridT, block>>>(d_A, d_B, d_C, n); });
     } else {
         std::printf("v3/v4 skipped: n must be a multiple of %d\n", BM);
+    }
+
+    if (n % V5_BM == 0 && n % V5_BN == 0 && n % V5_BK == 0) {
+        const dim3 gridV5(n / V5_BN, n / V5_BM);
+        runKernel("v5 8x8 tile, float4", [&] { matmulV5<<<gridV5, block>>>(d_A, d_B, d_C, n); });
+    } else {
+        std::printf("v5 skipped: n must be a multiple of %d\n", V5_BM);
     }
 
     // ---------- cuBLAS with TF32 Tensor Cores (lower precision: 10-bit mantissa) ----------
