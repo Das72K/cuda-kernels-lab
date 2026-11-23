@@ -296,6 +296,72 @@ __global__ __launch_bounds__(V5_THREADS, 2) void matmulV5(const float* A, const 
 }
 
 // ============================================================
+// v6: v5 with a bank-conflict-free B-fragment mapping
+//     Nsight showed v5's Bs loads conflict: thread tx read Bs[k][tx*8] and Bs[k][tx*8+4], a stride of
+//     8 floats, so the 16 distinct float4s of a warp fell on only 4 of the 8 bank groups.
+//     v6 gives each thread two groups of 4 columns, 64 apart: tx*4 + 0..3 and 64 + tx*4 + 0..3.
+//     The 16 float4s of a warp are then 256 contiguous bytes: 2 wavefronts, no conflicts.
+//     Same tile sizes, loads, registers and FMAs as v5; only the thread-to-column mapping changes.
+//     Requires n % 128 == 0.
+// ============================================================
+constexpr int V6_HALF = V5_BN / 2;                   // 64: offset of the second column group
+
+__global__ __launch_bounds__(V5_THREADS, 2) void matmulV6(const float* A, const float* B, float* C, int n)
+{
+    __shared__ __align__(16) float As[V5_BK][V5_BM + V5_PAD];   // transposed + padded A tile
+    __shared__ __align__(16) float Bs[V5_BK][V5_BN];
+
+    const int tx  = threadIdx.x;              // 0..15 -> columns tx*4 + 0..3 and 64 + tx*4 + 0..3
+    const int ty  = threadIdx.y;              // 0..15 -> rows ty*8 + 0..7 (as in v5)
+    const int tid = ty * blockDim.x + tx;
+
+    const int rowBase = blockIdx.y * V5_BM;
+    const int colBase = blockIdx.x * V5_BN;
+
+    float acc[V5_TM][V5_TN] = {};             // acc[i][0..3]: first column group, acc[i][4..7]: second
+
+    for (int t = 0; t < n; t += V5_BK) {
+        // 1. cooperative load: identical to v5
+        const int ar = tid / (V5_BK / 4), ak = (tid % (V5_BK / 4)) * 4;
+        const float4 aGlobal = *reinterpret_cast<const float4*>(&A[(rowBase + ar) * n + (t + ak)]);
+        As[ak + 0][ar] = aGlobal.x;
+        As[ak + 1][ar] = aGlobal.y;
+        As[ak + 2][ar] = aGlobal.z;
+        As[ak + 3][ar] = aGlobal.w;
+
+        const int br = tid / (V5_BN / 4), bc = (tid % (V5_BN / 4)) * 4;
+        *reinterpret_cast<float4*>(&Bs[br][bc]) =
+            *reinterpret_cast<const float4*>(&B[(t + br) * n + (colBase + bc)]);
+        __syncthreads();
+
+        // 2. for each k: A fragment as in v5, B fragment from two groups 64 columns apart
+        #pragma unroll
+        for (int k = 0; k < V5_BK; k++) {
+            const float4 a0 = *reinterpret_cast<const float4*>(&As[k][ty * V5_TM]);
+            const float4 a1 = *reinterpret_cast<const float4*>(&As[k][ty * V5_TM + 4]);
+            const float4 b0 = *reinterpret_cast<const float4*>(&Bs[k][tx * 4]);
+            const float4 b1 = *reinterpret_cast<const float4*>(&Bs[k][V6_HALF + tx * 4]);
+            const float a[V5_TM] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+            const float b[V5_TN] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
+            #pragma unroll
+            for (int i = 0; i < V5_TM; i++)
+                #pragma unroll
+                for (int j = 0; j < V5_TN; j++)
+                    acc[i][j] += a[i] * b[j];
+        }
+        __syncthreads();
+    }
+
+    // 3. each output row: one float4 per column group
+    #pragma unroll
+    for (int i = 0; i < V5_TM; i++) {
+        float* c = &C[(rowBase + ty * V5_TM + i) * n + colBase];
+        *reinterpret_cast<float4*>(c + tx * 4)           = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+        *reinterpret_cast<float4*>(c + V6_HALF + tx * 4) = make_float4(acc[i][4], acc[i][5], acc[i][6], acc[i][7]);
+    }
+}
+
+// ============================================================
 // CPU baseline: i-k-j loop order (walks rows of B and C, which is cache-friendly)
 // ============================================================
 void matmulCPU(const float* A, const float* B, float* C, int n)
@@ -323,7 +389,7 @@ float maxAbsDiff(const std::vector<float>& x, const std::vector<float>& y)
 }
 
 // ============================================================
-// Size sweep: cuBLAS (FP32) vs v3 vs v4 vs v5, correctness checked against cuBLAS
+// Size sweep: cuBLAS (FP32) vs v3 vs v4 vs v5 vs v6, correctness checked against cuBLAS
 // ============================================================
 void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::DeviceInfo& dev)
 {
@@ -331,7 +397,7 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
     const float alpha = 1.0f, beta = 0.0f;
 
     std::printf("\nSize sweep: GFLOPS (%% of cuBLAS)\n");
-    std::printf("%8s %12s %22s %22s %22s %6s\n", "n", "cuBLAS", "v3", "v4", "v5", "check");
+    std::printf("%8s %12s %22s %22s %22s %22s %6s\n", "n", "cuBLAS", "v3", "v4", "v5", "v6", "check");
 
     for (int n : sizes) {
         const size_t elems = size_t(n) * n;
@@ -382,23 +448,35 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
                                 ("v5 8x8 tile, float4 n=" + std::to_string(n)).c_str());
             CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
             err5 = maxAbsDiff(h_C, h_ref);
+        }
+        bench::Stats s6;
+        float err6 = 0.0f;
+        if (runV5) {   // v6 has the same size requirement as v5
+            const dim3 gridV6(n / V5_BN, n / V5_BM);
+            CUDA_CHECK(cudaMemset(d_C, 0, bytes));
+            s6 = bench::timeGpu([&] { matmulV6<<<gridV6, block>>>(d_A, d_B, d_C, n); },
+                                ("v6 8x8, conflict-free B n=" + std::to_string(n)).c_str());
+            CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost));
+            err6 = maxAbsDiff(h_C, h_ref);
         } else {
-            std::printf("v5 skipped at n = %d: n must be a multiple of %d\n", n, V5_BM);
+            std::printf("v5/v6 skipped at n = %d: n must be a multiple of %d\n", n, V5_BM);
         }
 
         auto gf = [&](const bench::Stats& t) { return flops / (t.median / 1e3) / 1e9; };
-        char v5Col[32];
+        char v5Col[32], v6Col[32];
         if (runV5) {
             std::snprintf(v5Col, sizeof v5Col, "%13.1f (%5.1f%%)", gf(s5), 100.0 * ref.median / s5.median);
+            std::snprintf(v6Col, sizeof v6Col, "%13.1f (%5.1f%%)", gf(s6), 100.0 * ref.median / s6.median);
         } else {
             std::snprintf(v5Col, sizeof v5Col, "%22s", "skipped");
+            std::snprintf(v6Col, sizeof v6Col, "%22s", "skipped");
         }
-        std::printf("%8d %12.1f %13.1f (%5.1f%%) %13.1f (%5.1f%%) %s %6s\n",
+        std::printf("%8d %12.1f %13.1f (%5.1f%%) %13.1f (%5.1f%%) %s %s %6s\n",
                     n, gf(ref),
                     gf(s3), 100.0 * ref.median / s3.median,
                     gf(s4), 100.0 * ref.median / s4.median,
-                    v5Col,
-                    (err3 < kTol && err4 < kTol && err5 < kTol) ? "PASS" : "FAIL");
+                    v5Col, v6Col,
+                    (err3 < kTol && err4 < kTol && err5 < kTol && err6 < kTol) ? "PASS" : "FAIL");
 
         auto row = [&](const char* name, const bench::Stats& t, float err) {
             bench::Row r;
@@ -417,6 +495,7 @@ void sizeSweep(cublasHandle_t handle, bench::CsvWriter& csv, const bench::Device
         row("v3 register tiling 4x4", s3, err3);
         row("v4 float4 + transposed A", s4, err4);
         if (runV5) row("v5 8x8 tile, float4", s5, err5);
+        if (runV5) row("v6 8x8, conflict-free B", s6, err6);
 
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
@@ -531,8 +610,9 @@ int main(int argc, char** argv)
     if (n % V5_BM == 0 && n % V5_BN == 0 && n % V5_BK == 0) {
         const dim3 gridV5(n / V5_BN, n / V5_BM);
         runKernel("v5 8x8 tile, float4", [&] { matmulV5<<<gridV5, block>>>(d_A, d_B, d_C, n); });
+        runKernel("v6 8x8, conflict-free B", [&] { matmulV6<<<gridV5, block>>>(d_A, d_B, d_C, n); });
     } else {
-        std::printf("v5 skipped: n must be a multiple of %d\n", V5_BM);
+        std::printf("v5/v6 skipped: n must be a multiple of %d\n", V5_BM);
     }
 
     // ---------- cuBLAS with TF32 Tensor Cores (lower precision: 10-bit mantissa) ----------
